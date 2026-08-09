@@ -127,6 +127,11 @@ bool Engine::start(const EngineConfig& cfg, std::wstring& err) {
 	inPeakL_.store(0.f, std::memory_order_relaxed);
 	inPeakR_.store(0.f, std::memory_order_relaxed);
 	outPeak_.store(0.f, std::memory_order_relaxed);
+	midPeak_.store(0.f, std::memory_order_relaxed);
+	sidePeak_.store(0.f, std::memory_order_relaxed);
+	correlation_.store(0.f, std::memory_order_relaxed);
+	minLimiterGain_.store(1.f, std::memory_order_relaxed);
+	chainLatencyFrames_.store(0, std::memory_order_relaxed);
 	{
 		std::lock_guard<std::mutex> lock(errorMutex_);
 		asyncError_.clear();
@@ -185,6 +190,10 @@ EngineStats Engine::stats() {
 	s.inPeakL = inPeakL_.exchange(0.f, std::memory_order_relaxed);
 	s.inPeakR = inPeakR_.exchange(0.f, std::memory_order_relaxed);
 	s.outPeak = outPeak_.exchange(0.f, std::memory_order_relaxed);
+	s.midPeak = midPeak_.exchange(0.f, std::memory_order_relaxed);
+	s.sidePeak = sidePeak_.exchange(0.f, std::memory_order_relaxed);
+	s.correlation = correlation_.load(std::memory_order_relaxed);
+	s.gainReductionDb = gainToDb(minLimiterGain_.exchange(1.f, std::memory_order_relaxed));
 
 	if (s.captureRate > 0) {
 		s.ringMs = 1000.0 * double(ring_.availableApprox()) / double(s.captureRate);
@@ -199,8 +208,21 @@ EngineStats Engine::stats() {
 		               / double(s.renderRate);
 		s.renderPeriodMs = 1000.0 * double(renderPeriodFrames_.load(std::memory_order_relaxed))
 		                 / double(s.renderRate);
+		// The chain's own delay is part of the round trip, not a footnote to
+		// it: at the shipping settings the linear-phase Hilbert and the
+		// limiter's look-ahead together are a sixth of the total.
+		s.processingMs = processingLatencyMs();
+		s.roundTripMs += s.processingMs;
 	}
 	return s;
+}
+
+
+double Engine::processingLatencyMs() const {
+	const uint32_t rate = renderRate_.load(std::memory_order_relaxed);
+	if (rate == 0)
+		return 0.0;
+	return 1000.0 * double(chainLatencyFrames_.load(std::memory_order_relaxed)) / double(rate);
 }
 
 
@@ -574,8 +596,11 @@ void Engine::renderThread(EngineConfig cfg, Ready* readyPtr) {
 				break;
 			}
 
-			const ChainSettings settings = params.snapshot();
+			const RealMonoSettings settings = params.snapshot();
 			float blockPeak = 0.f;
+			float blockMid = 0.f, blockSide = 0.f;
+			float minGain = 1.f;
+			double sumLR = 0.0, sumLL = 0.0, sumRR = 0.0;
 
 			for (UINT32 i = 0; i < frames; i++) {
 				float l = 0.f, r = 0.f;
@@ -592,12 +617,25 @@ void Engine::renderThread(EngineConfig cfg, Ready* readyPtr) {
 					l = r = 0.f;
 				}
 
-				// The chain runs even while priming, on silence. Its filter
-				// state and control smoothing stay live, so audio resumes into
-				// a settled filter rather than a discontinuity.
-				const float y = chain_.processFrame(l, r, settings);
-				blockPeak = std::max(blockPeak, std::abs(y));
-				writeMonoFrame(fmt, data + size_t(i) * fmt.frameBytes, y);
+				// Mid and Side are metered before the chain, on the signal as
+				// it arrived: what the Advanced page is asking is "how much
+				// Side is in this source", not "how much survived".
+				blockMid = std::max(blockMid, std::abs(0.5f * (l + r)));
+				blockSide = std::max(blockSide, std::abs(0.5f * (l - r)));
+				sumLR += double(l) * double(r);
+				sumLL += double(l) * double(l);
+				sumRR += double(r) * double(r);
+
+				// The chain runs even while priming, on silence. Its delay
+				// lines, filter state and control smoothing stay live, so
+				// audio resumes into a settled chain rather than a
+				// discontinuity.
+				float yL = 0.f, yR = 0.f;
+				chain_.process(l, r, settings, yL, yR);
+				minGain = std::min(minGain, chain_.limiterGain());
+
+				blockPeak = std::max(blockPeak, std::max(std::abs(yL), std::abs(yR)));
+				writeFrontPairFrame(fmt, data + size_t(i) * fmt.frameBytes, yL, yR);
 			}
 
 			renderClient->ReleaseBuffer(frames, 0);
@@ -606,6 +644,27 @@ void Engine::renderThread(EngineConfig cfg, Ready* readyPtr) {
 			while (blockPeak > prev
 			       && !outPeak_.compare_exchange_weak(prev, blockPeak, std::memory_order_relaxed))
 				;
+			prev = midPeak_.load(std::memory_order_relaxed);
+			while (blockMid > prev
+			       && !midPeak_.compare_exchange_weak(prev, blockMid, std::memory_order_relaxed))
+				;
+			prev = sidePeak_.load(std::memory_order_relaxed);
+			while (blockSide > prev
+			       && !sidePeak_.compare_exchange_weak(prev, blockSide, std::memory_order_relaxed))
+				;
+			prev = minLimiterGain_.load(std::memory_order_relaxed);
+			while (minGain < prev
+			       && !minLimiterGain_.compare_exchange_weak(prev, minGain, std::memory_order_relaxed))
+				;
+
+			// Correlation over the block, on a silence guard: an idle stream
+			// would otherwise divide zero by zero and publish a NaN into a
+			// label.
+			const double denom = std::sqrt(sumLL * sumRR);
+			correlation_.store(denom > 1e-12 ? float(sumLR / denom) : 0.f,
+			                   std::memory_order_relaxed);
+			chainLatencyFrames_.store(uint32_t(chain_.latencySamples()),
+			                          std::memory_order_relaxed);
 
 			// One drift correction per block. Frozen while priming, because the
 			// fill is deliberately abnormal then and feeding that to the

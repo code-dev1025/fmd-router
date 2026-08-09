@@ -170,14 +170,25 @@ inline void writeSample(const SampleFormat& f, uint8_t* frame, uint32_t ch, floa
 }
 
 
-/** Mono float -> one destination frame. The sample goes to the front pair so
-    it is centred on a stereo device; any further channels are zeroed rather
-    than fed, to keep a centre speaker or LFE out of it. */
-inline void writeMonoFrame(const SampleFormat& f, uint8_t* frame, float v) {
-	const uint32_t pair = (f.channels > 1) ? 2u : 1u;
-	for (uint32_t ch = 0; ch < pair; ch++)
-		writeSample(f, frame, ch, v);
-	for (uint32_t ch = pair; ch < f.channels; ch++)
+/** A stereo pair -> one destination frame, written to the front pair. In
+    normal operation the chain hands over dual mono (l == r), which is what a
+    multi-room system wants: every speaker gets the same coherent feed. It is
+    still written as a pair rather than as one value because global bypass is a
+    genuine stereo pass-through, and because bypassing the mono commit leaves
+    the chain in its M/S domain on purpose.
+
+    Channels beyond the front pair are zeroed rather than fed, to keep a centre
+    speaker or LFE out of it. */
+inline void writeFrontPairFrame(const SampleFormat& f, uint8_t* frame, float l, float r) {
+	if (f.channels == 1) {
+		// A mono endpoint gets the sum of the pair, which for dual mono is
+		// simply the signal back again.
+		writeSample(f, frame, 0, 0.5f * (l + r));
+		return;
+	}
+	writeSample(f, frame, 0, l);
+	writeSample(f, frame, 1, r);
+	for (uint32_t ch = 2; ch < f.channels; ch++)
 		writeSample(f, frame, ch, 0.f);
 }
 

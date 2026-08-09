@@ -8,26 +8,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(NOT WIN32)
     message(FATAL_ERROR
-        "fmd-router is built on WASAPI and the Windows audio session APIs, "
-        "so it is Windows-only by construction.")
+        "The Real Mono Sound host is built on WASAPI and the Windows audio session "
+        "APIs, so it is Windows-only by construction. The DSP itself is portable and "
+        "is exercised by the fmd-router-tests target.")
 endif()
 
-# The filter is not vendored -- it is the same FmdDsp.hpp the VCV plugin builds,
-# read straight from that checkout, so the two can never drift apart. The Rack
-# stand-ins in fmd-vcv/tests are used for the same reason.
-set(FMD_VCV_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../fmd-vcv"
-    CACHE PATH "Path to the fmd-vcv checkout that supplies FmdDsp.hpp")
-
-if(NOT EXISTS "${FMD_VCV_DIR}/src/FmdDsp.hpp")
-    message(FATAL_ERROR
-        "FmdDsp.hpp not found under FMD_VCV_DIR (${FMD_VCV_DIR}).\n"
-        "Point it at the fmd-vcv checkout, e.g. -DFMD_VCV_DIR=D:/project/se_framework/fmd-vcv")
-endif()
-if(NOT EXISTS "${FMD_VCV_DIR}/tests/fmd_test_shim.hpp")
-    message(FATAL_ERROR
-        "fmd_test_shim.hpp not found under ${FMD_VCV_DIR}/tests -- it supplies the four "
-        "Rack symbols FmdDsp.hpp needs to build outside Rack.")
-endif()
+# The chain has no third-party dependency: the Hilbert transformer, the
+# quadrature network, the filters and the limiter are all in src/RealMono.h.
+# See the header for the RS-MET classes each one stands in for.
 
 add_executable(fmd-router WIN32
     src/Main.cpp
@@ -35,11 +23,7 @@ add_executable(fmd-router WIN32
     src/Devices.cpp
 )
 
-target_include_directories(fmd-router PRIVATE
-    src
-    "${FMD_VCV_DIR}/src"
-    "${FMD_VCV_DIR}/tests"
-)
+target_include_directories(fmd-router PRIVATE src)
 
 target_compile_definitions(fmd-router PRIVATE
     UNICODE
@@ -65,15 +49,12 @@ endif()
 set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY VS_STARTUP_PROJECT fmd-router)
 
 
-# Offline checks for the chain, the ring and the resampler. No Windows APIs, so
-# this target is plain portable C++ and runs anywhere the compiler does.
-add_executable(fmd-router-tests tests/TestChain.cpp)
+# Offline checks for the Real Mono chain, the ring and the resampler. No
+# Windows APIs, so this target is plain portable C++ and runs anywhere the
+# compiler does.
+add_executable(fmd-router-tests tests/TestRealMono.cpp)
 
-target_include_directories(fmd-router-tests PRIVATE
-    src
-    "${FMD_VCV_DIR}/src"
-    "${FMD_VCV_DIR}/tests"
-)
+target_include_directories(fmd-router-tests PRIVATE src)
 
 if(MSVC)
     target_compile_options(fmd-router-tests PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -82,4 +63,4 @@ else()
 endif()
 
 enable_testing()
-add_test(NAME chain COMMAND fmd-router-tests)
+add_test(NAME realmono COMMAND fmd-router-tests)

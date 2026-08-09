@@ -2,7 +2,7 @@
 
 #include "AudioFormat.h"
 #include "Com.h"
-#include "MonoChain.h"
+#include "RealMonoChain.h"
 #include "Resampler.h"
 #include "Ring.h"
 
@@ -38,7 +38,8 @@ struct EngineStats {
 	uint32_t captureChannels = 0;
 	uint32_t renderChannels = 0;
 	double ringMs = 0.0;         // audio currently queued
-	double roundTripMs = 0.0;    // ring + the render endpoint's own buffer
+	double roundTripMs = 0.0;    // ring + chain + the render endpoint's buffer
+	double processingMs = 0.0;   // the chain's own latency (Hilbert + look-ahead)
 	double capturePeriodMs = 0.0;
 	double renderPeriodMs = 0.0;
 	double ratio = 1.0;         // resampler ratio actually in use
@@ -47,6 +48,15 @@ struct EngineStats {
 	float inPeakL = 0.f;
 	float inPeakR = 0.f;
 	float outPeak = 0.f;
+
+	// The Advanced page's meters. Correlation is +1 for a mono source, 0 for
+	// unrelated channels and -1 for anti-phase -- which is the signal that
+	// would vanish entirely in a plain downmix, so it is the one number that
+	// says whether Real Mono has anything to recover.
+	float midPeak = 0.f;
+	float sidePeak = 0.f;
+	float correlation = 0.f;
+	float gainReductionDb = 0.f;  // most reduction since the last read, <= 0
 };
 
 
@@ -84,7 +94,12 @@ public:
 	std::wstring takeAsyncError();
 
 	/** Written by the GUI thread, read by the render thread. */
-	ChainParams params;
+	RealMonoParams params;
+
+	/** The chain's added delay in milliseconds, or 0 while stopped. Published
+	    separately from stats() because the UI shows it whether or not anything
+	    is running. */
+	double processingLatencyMs() const;
 
 private:
 	struct Ready {
@@ -103,7 +118,7 @@ private:
 	static bool waitReady(Ready& ready, std::wstring& err);
 
 	StereoRing ring_;
-	MonoChain chain_;
+	RealMonoChain chain_;
 	Resampler resampler_;
 	DriftController drift_;
 
@@ -128,6 +143,11 @@ private:
 	std::atomic<float> inPeakL_{0.f};
 	std::atomic<float> inPeakR_{0.f};
 	std::atomic<float> outPeak_{0.f};
+	std::atomic<float> midPeak_{0.f};
+	std::atomic<float> sidePeak_{0.f};
+	std::atomic<float> correlation_{0.f};
+	std::atomic<float> minLimiterGain_{1.f};
+	std::atomic<uint32_t> chainLatencyFrames_{0};
 	std::atomic<double> ratio_{1.0};
 
 	std::mutex errorMutex_;
