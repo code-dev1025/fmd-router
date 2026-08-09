@@ -307,6 +307,47 @@ Windows API. The ones worth knowing about:
 - A NaN from the capture device never reaches the endpoint, and the chain
   recovers once it has flushed through.
 
+## Hearing it without a cable: `realmono-wav`
+
+Judging the chain by ear through the live path needs a virtual cable and two
+endpoints. `realmono-wav` does not: it runs a WAV file through the *same*
+`RealMonoChain` the audio thread runs, so what it writes is what the app would
+have played. This is the harness for the A/B against the client's before/after
+references.
+
+```sh
+build/Release/realmono-wav --demo source.wav                      # a test signal
+build/Release/realmono-wav source.wav realmono.wav                # the product
+build/Release/realmono-wav source.wav classic.wav --preset midonly  # to A/B against
+```
+
+The output is latency-compensated by default, so the files line up sample for
+sample and can be dropped onto adjacent DAW tracks without nudging anything.
+Every stage bypass, quality mode and gain from the Advanced page has a flag;
+`--help` lists them.
+
+`--demo` writes twelve seconds in four sections, which is the fastest way to
+hear what the product does. Measured on those sections, dB RMS:
+
+| Section | Source | Real Mono | Classic mono |
+| --- | --- | --- | --- |
+| Correlated | −12.50 | −12.50 | −12.50 |
+| **Pure Side** (`R = −L`) | −12.50 | **−12.50** | **−240.00** |
+| Hard panned left | −13.47 | −16.48 | −19.49 |
+| Widened mix | −11.65 | −11.65 | −13.47 |
+
+The second row is the product: a plain downmix takes it to digital silence,
+Real Mono returns it at its original level. The third is the −3 dB quadrature
+sum against the −6 dB linear one. The fourth is the case that matters on real
+programme material — a mono bass with a widened top, where the top is what goes
+missing.
+
+The client's test file is an MP3, so convert first:
+
+```sh
+ffmpeg -i "stereo flute and mono guitar.mp3" -c:a pcm_s24le test.wav
+```
+
 ## What has and has not been verified
 
 **Verified on the build machine** (Windows 10 Pro 19045, Realtek HD Audio):
@@ -320,7 +361,12 @@ Windows API. The ones worth knowing about:
   block either side of its 30 ms target; the drops counter is the number that
   says whether that mattered.
 - Every control on both pages is bound to a parameter the audio thread reads,
-  and the stage bypasses grey out the controls they disable.
+  and the stage bypasses grey out the controls they disable. The enable, HQ and
+  Stage 3 switches were clicked while the engine was running, and the chain
+  reported the state change each time.
+- End to end on a file: the `--demo` signal through `realmono-wav` gives the
+  table above, dual mono on every frame, and latency compensation exact to
+  0.00000.
 
 **Not verified:**
 
@@ -329,7 +375,8 @@ Windows API. The ones worth knowing about:
   whether the client agrees it is their process.
 - **Against the client's material.** `stereo flute and mono guitar.mp3` and the
   before/after references were not available here, so the A/B against Alex's
-  MSED + PHA-979 chain has not been run. That is the first thing to do.
+  MSED + PHA-979 chain has not been run. That is the first thing to do, and
+  `realmono-wav` is the tool for it.
 - **The VB-CABLE path itself.** No virtual cable is installed on this machine,
   so the capture side was exercised against a physical endpoint — the same
   `IAudioClient` code path, but not the same device.
