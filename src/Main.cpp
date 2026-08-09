@@ -101,37 +101,42 @@ const SliderDef kSliders[SL_COUNT] = {
 	{5.f,    10.f, L" ms", 1},   // look-ahead   5..10
 };
 
-const wchar_t* const kQualityNames[NumQualities] = {
-	L"Linear phase, HQ (1023 taps)",
-	L"Linear phase, short (255 taps)",
-	L"Allpass IIR (lowest latency)",
-};
-
-const wchar_t* const kCommitNames[NumCommitModes] = {
-	L"Mid + rotated Side  (product)",
-	L"Sum 0.5(L+R)  (reference)",
-	L"Mid only  (Side discarded)",
-	L"Side energy fold  (lab)",
-	L"Polarity matrix  (lab)",
-};
-
-struct SlopeOption {
+/*  Every drop-down is a label with the value it stands for written next to it,
+    never a position in a list. The wording is expected to be revised, and a
+    combo whose meaning is its row number turns "reorder these more sensibly"
+    into a silent change of what the audio thread does. Renaming, reordering
+    and inserting are all safe here; the static_asserts below catch the one
+    thing that is not, which is forgetting to list a mode at all. */
+struct Option {
 	const wchar_t* label;
-	int slope;
+	int value;
 };
 
-const SlopeOption kSlopes[] = {
+const Option kQualities[] = {
+	{L"Linear phase, HQ (1023 taps)",   QualityHqLinear},
+	{L"Linear phase, short (255 taps)", QualityShortLinear},
+	{L"Allpass IIR (lowest latency)",   QualityAllpass},
+};
+static_assert(std::size(kQualities) == NumQualities,
+              "every Stage 3 quality needs a row in the drop-down");
+
+const Option kCommits[] = {
+	{L"Mid + rotated Side  (product)", CommitMidPlusRotatedSide},
+	{L"Sum 0.5(L+R)  (reference)",     CommitSum},
+	{L"Mid only  (Side discarded)",    CommitMidOnly},
+	{L"Side energy fold  (lab)",       CommitSideEnergyFold},
+	{L"Polarity matrix  (lab)",        CommitPolarityMatrix},
+};
+static_assert(std::size(kCommits) == NumCommitModes,
+              "every Stage 4 commit mode needs a row in the drop-down");
+
+const Option kSlopes[] = {
 	{L"6 dB/oct", 6},
 	{L"12 dB/oct", 12},
 	{L"24 dB/oct", 24},
 };
 
-struct HpfModeOption {
-	const wchar_t* label;
-	int mode;
-};
-
-const HpfModeOption kHpfModes[] = {
+const Option kHpfModes[] = {
 	{L"Side high-pass (Butterworth)", HpfSide},
 	{L"Crossover to mono (LR)", HpfCrossoverMono},
 };
@@ -221,6 +226,35 @@ int comboSelection(HWND combo, int fallback = 0) {
 	return (sel == CB_ERR) ? fallback : int(sel);
 }
 
+/** Fills a drop-down from an option table, in table order. */
+template <size_t N>
+void fillOptions(HWND combo, const Option (&table)[N]) {
+	SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+	for (size_t i = 0; i < N; i++)
+		SendMessageW(combo, CB_ADDSTRING, 0, LPARAM(table[i].label));
+}
+
+/** What is selected, as a value rather than a row number. A selection outside
+    the table cannot happen from the UI, but it is bounded here anyway: the
+    alternative failure is reading past the array into whatever follows it. */
+template <size_t N>
+int optionValue(HWND combo, const Option (&table)[N], int fallback) {
+	const int i = comboSelection(combo, -1);
+	if (i < 0 || size_t(i) >= N)
+		return fallback;
+	return table[i].value;
+}
+
+/** The row a value sits on, for putting a preset back on screen. */
+template <size_t N>
+int optionIndex(const Option (&table)[N], int value) {
+	for (size_t i = 0; i < N; i++) {
+		if (table[i].value == value)
+			return int(i);
+	}
+	return 0;
+}
+
 std::wstring formatDb(float db) {
 	wchar_t buf[32];
 	swprintf_s(buf, L"%+.1f dB", db);
@@ -240,18 +274,18 @@ RealMonoSettings uiSettings() {
 
 	s.hpfEnabled = checked(g.s1Enable);
 	s.hpfHz = sliderValue(SL_HPF_FC);
-	s.hpfSlope = kSlopes[comboSelection(g.s1Slope, 1)].slope;
-	s.hpfMode = kHpfModes[comboSelection(g.s1Mode, 0)].mode;
+	s.hpfSlope = optionValue(g.s1Slope, kSlopes, 12);
+	s.hpfMode = optionValue(g.s1Mode, kHpfModes, HpfSide);
 
 	s.msEnabled = checked(g.s2Enable);
 	s.midGainDb = sliderValue(SL_MID);
 	s.sideGainDb = sliderValue(SL_SIDE);
 
 	s.rotateEnabled = checked(g.s3Enable);
-	s.quality = comboSelection(g.s3Quality, QualityHqLinear);
+	s.quality = optionValue(g.s3Quality, kQualities, QualityHqLinear);
 
 	s.commitEnabled = checked(g.s4Enable);
-	s.commitMode = comboSelection(g.s4Mode, CommitMidPlusRotatedSide);
+	s.commitMode = optionValue(g.s4Mode, kCommits, CommitMidPlusRotatedSide);
 	s.sideInjectDb = sliderValue(SL_INJECT);
 	s.outputGainDb = sliderValue(SL_OUTPUT);
 
@@ -259,22 +293,6 @@ RealMonoSettings uiSettings() {
 	s.ceilingDb = sliderValue(SL_CEILING);
 	s.lookaheadMs = sliderValue(SL_LOOKAHEAD);
 	return s;
-}
-
-int slopeIndex(int slope) {
-	for (int i = 0; i < int(std::size(kSlopes)); i++) {
-		if (kSlopes[i].slope == slope)
-			return i;
-	}
-	return 1;
-}
-
-int hpfModeIndex(int mode) {
-	for (int i = 0; i < int(std::size(kHpfModes)); i++) {
-		if (kHpfModes[i].mode == mode)
-			return i;
-	}
-	return 0;
 }
 
 void refreshValueLabels() {
@@ -351,18 +369,18 @@ void applySettingsToUi(const RealMonoSettings& s) {
 
 	setChecked(g.s1Enable, s.hpfEnabled);
 	setSlider(SL_HPF_FC, s.hpfHz);
-	SendMessageW(g.s1Slope, CB_SETCURSEL, slopeIndex(s.hpfSlope), 0);
-	SendMessageW(g.s1Mode, CB_SETCURSEL, hpfModeIndex(s.hpfMode), 0);
+	SendMessageW(g.s1Slope, CB_SETCURSEL, optionIndex(kSlopes, s.hpfSlope), 0);
+	SendMessageW(g.s1Mode, CB_SETCURSEL, optionIndex(kHpfModes, s.hpfMode), 0);
 
 	setChecked(g.s2Enable, s.msEnabled);
 	setSlider(SL_MID, s.midGainDb);
 	setSlider(SL_SIDE, s.sideGainDb);
 
 	setChecked(g.s3Enable, s.rotateEnabled);
-	SendMessageW(g.s3Quality, CB_SETCURSEL, s.quality, 0);
+	SendMessageW(g.s3Quality, CB_SETCURSEL, optionIndex(kQualities, s.quality), 0);
 
 	setChecked(g.s4Enable, s.commitEnabled);
-	SendMessageW(g.s4Mode, CB_SETCURSEL, s.commitMode, 0);
+	SendMessageW(g.s4Mode, CB_SETCURSEL, optionIndex(kCommits, s.commitMode), 0);
 	setSlider(SL_INJECT, s.sideInjectDb);
 	setSlider(SL_OUTPUT, s.outputGainDb);
 
@@ -737,14 +755,12 @@ void buildAdvanced() {
 	advChild(L"STATIC", L"Slope:", SS_LEFT, 46, 672, 46, 20, -1);
 	g.s1Slope = advChild(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP,
 	                     96, 668, 100, 200, IDC_S1_SLOPE);
-	for (const SlopeOption& o : kSlopes)
-		SendMessageW(g.s1Slope, CB_ADDSTRING, 0, LPARAM(o.label));
+	fillOptions(g.s1Slope, kSlopes);
 
 	advChild(L"STATIC", L"Shape:", SS_LEFT, 212, 672, 50, 20, -1);
 	g.s1Mode = advChild(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP,
 	                    266, 668, 240, 200, IDC_S1_MODE);
-	for (const HpfModeOption& o : kHpfModes)
-		SendMessageW(g.s1Mode, CB_ADDSTRING, 0, LPARAM(o.label));
+	fillOptions(g.s1Mode, kHpfModes);
 
 	// ------------------------------------------------------------- Stage 2
 	g.s2Enable = advChild(L"BUTTON", L"Stage 2   Mid / Side split",
@@ -765,8 +781,7 @@ void buildAdvanced() {
 	advChild(L"STATIC", L"Quality:", SS_LEFT, 288, 758, 60, 20, -1);
 	g.s3Quality = advChild(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP,
 	                       352, 754, 272, 200, IDC_S3_QUALITY);
-	for (const wchar_t* name : kQualityNames)
-		SendMessageW(g.s3Quality, CB_ADDSTRING, 0, LPARAM(name));
+	fillOptions(g.s3Quality, kQualities);
 
 	// ------------------------------------------------------------- Stage 4
 	g.s4Enable = advChild(L"BUTTON", L"Stage 4   Mono commit",
@@ -774,8 +789,7 @@ void buildAdvanced() {
 	advChild(L"STATIC", L"Mode:", SS_LEFT, 240, 786, 46, 20, -1);
 	g.s4Mode = advChild(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP,
 	                    290, 782, 250, 200, IDC_S4_MODE);
-	for (const wchar_t* name : kCommitNames)
-		SendMessageW(g.s4Mode, CB_ADDSTRING, 0, LPARAM(name));
+	fillOptions(g.s4Mode, kCommits);
 
 	advChild(L"STATIC", L"Side inject", SS_LEFT, 26, 814, 76, 20, -1);
 	makeSlider(SL_INJECT, 106, 810, 130, true);
