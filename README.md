@@ -1,17 +1,68 @@
-# FMD Router — intercept system audio, process it, hear only the result
+# Real Mono Sound — stereo to a mono feed that keeps the difference
 
 A standalone Windows app that takes audio on its way out of another
-application — a browser tab, a game, a media player — runs it through the FMD
-filter chain, collapses it to mono, and plays only the processed version to your
-speakers. The original never reaches an output device.
+application — a browser tab, a streaming service, a media player — converts it
+to a **true mono-compatible** signal, and plays only that to your speakers. The
+original stereo never reaches an output device.
 
-![The router running](docs/ui-running.png)
+![The app running](docs/ui-running.png)
 
-Above: running at 48 kHz in and out, 30 ms of buffer, ~52 ms round trip, drift
-locked at 1.0000×, zero drops. The OUT meter is lit by the chain's own injected
-noise with NOISE at 60%.
+The point is what happens to the difference between the two channels. A plain
+`(L+R)/2` downmix cancels it: anything panned wide, anything in anti-phase, the
+reverb tail that was only ever in the Side, all of it goes silent the moment
+the two channels meet. Real Mono rotates the Side by 90° before the sum, so it
+survives instead.
 
-## How the interception works
+| Content | Plain `(L+R)/2` | Real Mono |
+| --- | --- | --- |
+| Correlated / centre | present | present |
+| Hard panned | −6 dB | −3 dB, in quadrature |
+| Pure difference (`R = −L`) | **silent** | recovered at full level |
+
+Those three rows are asserted in `tests/TestRealMono.cpp`, not claimed here.
+
+## The chain
+
+```
+  stereo in
+    │
+    ├─ Stage 0   HQ input trim         −3 dB, off by default
+    ├─ Stage 1   Side high-pass        BYPASSED — the client's process has none
+    ├─ Stage 2   M/S split             M = (L+R)/2      S = (L−R)/2
+    │                                        │               │
+    ├─ Stage 3   +90° rotation      delay-aligned      rot₊₉₀(S)
+    ├─ Stage 4   mono commit           mono = M + rot₊₉₀(S)
+    ├─ Stage 5   look-ahead limiter    ceiling −0.3 dBFS
+    └─ dual mono out                   outL = outR
+```
+
+Which is, in one line:
+
+```
+mono = 0.5 · [ (L + R) + rot₊₉₀(L − R) ]
+```
+
+### Where the ±90° went
+
+The reference process describes a Side-only *stereo bus* with +90° on its left
+and −90° on its right — MSED into PHA-979, twice. That bus is `(S, −S)`, and a
+−90° rotation is the negative of a +90° one, so after rotation it is
+`(rot₊₉₀(S), rot₊₉₀(S))`: both channels identical. Its mono downmix is exactly
+`rot₊₉₀(S)`, so the two-rotator arrangement collapses to one rotation of S.
+Same signal, half the work.
+
+### Levels, and the overshoot
+
+M and S use the 0.5 convention, so correlated content comes out at unity and
+pure difference content also comes out at unity. What overshoots is programme
+material: `rot₊₉₀(S)` has the same magnitude spectrum as S but a different
+waveform, so its peaks land in different places and the sum can exceed
+`max(|L|,|R|)`. On the test suite's programme-like material that overshoot
+measures **+2.26 dB**, which is the ~3 dB the client reported. Stage 5 catches
+it; highest quality mode takes 3 dB at the input instead, so the sum has the
+headroom before it needs winning back.
+
+## Interception
 
 Windows has no supported way for a normal application to reach into another
 app's audio and change it in place. There are three ways to get near it, and
@@ -20,15 +71,11 @@ this app takes the third:
 | Approach | Why not / why yes |
 | --- | --- |
 | Kernel virtual audio driver (like VB-CABLE itself) | Needs an EV code-signing certificate and WHQL attestation to load on a normal machine. Cannot be shipped from a source checkout. |
-| System-effect APO injected into the endpoint | Still a driver-package INF install and still signed, and support varies by audio driver. |
+| System-effect APO injected into the endpoint | Still a driver-package INF install and still signed, and support varies by audio driver. This is the brief's preferred path and remains open — the DSP does not care which side feeds it. |
 | **Route through a virtual cable and process in user mode** | **No driver, no signing, works today. Costs one free third-party install and one Windows setting.** |
 
-So the app is a router. You point Windows at a virtual audio cable, and the app
-captures the far end of that cable, processes it, and renders to your real
-device:
-
 ```
-  Browser / game / player
+  Browser / streaming service / player
             │
             ▼
   ┌───────────────────────┐
@@ -39,18 +86,18 @@ device:
               │  and is NOT going to any speaker
               ▼
   ┌───────────────────────┐
-  │  CABLE Output         │   ← FMD Router captures here (WASAPI, event-driven)
+  │  CABLE Output         │   ← captured here (WASAPI, event-driven)
   └───────────┬───────────┘
               ▼
      ring buffer + drift-corrected resampler
               ▼
-     (L+R)/2  →  FilterCore  →  mono
+       the Real Mono chain above
               ▼
   ┌───────────────────────┐
-  │  Your speakers        │   ← FMD Router renders here
+  │  Your speakers        │   ← rendered here, dual mono
   └───────────┬───────────┘
               ▼
-             🔊  processed only
+             🔊  one coherent feed, every room
 ```
 
 The unprocessed audio never reaches a speaker because the only device it was
@@ -63,107 +110,171 @@ ever sent to is the cable, and the cable has no speaker on it.
 2. **Make it the default output.** Settings → System → Sound → Output →
    *CABLE Input (VB-Audio Virtual Cable)*. Everything now goes silent, which is
    correct: the audio is in the cable and nothing is playing it yet.
-3. **Open FMD Router.** It preselects *CABLE Output* as the source as soon as it
-   sees one, and your default device as the destination. Set *Play processed to*
-   to your real speakers or headphones.
+3. **Open Real Mono Sound.** It preselects *CABLE Output* as the source as soon
+   as it sees one, and your default device as the destination. Set *Play
+   processed to* to your real speakers or headphones.
 4. **Press Start.**
 
-To send only *one* app through the chain rather than everything, leave the system
-default alone and use Settings → System → Sound → Volume mixer → *App volume and
-device preferences*, setting just that app's output to *CABLE Input*.
+To send only *one* app through the chain rather than everything, leave the
+system default alone and use Settings → System → Sound → Volume mixer → *App
+volume and device preferences*, setting just that app's output to *CABLE
+Input*.
 
 ### Trying it without installing anything
 
 Tick **Loopback** and the source list becomes your *playback* devices; the app
-taps one of them instead of a capture endpoint. This is good for auditioning the
-chain, but it is not interception — you hear the original alongside the
-processed version, because the original is still going to a real speaker.
+taps one of them instead of a capture endpoint. This is good for auditioning
+the chain, but it is not interception — you hear the original alongside the
+mono version, because the original is still going to a real speaker.
 
 Pointing loopback at the same device you render to is refused rather than
 warned about: it is a feedback loop that reaches full scale in well under a
 second.
 
-## The chain
+## The interface
 
-```
-  L ─┐
-     ├─► M = (L+R)/2 ─┬──────────────────────────────────► dry
-  R ─┘                │
-                      ├─► FilterCore voice 0  (freq × 2^−spread) ─┐
-                      └─► FilterCore voice 1  (freq × 2^+spread) ─┴─► wet
-                                                                    │
-                      out = dry·(1−MIX) + wet·MIX, × OUT ◄──────────┘
-```
+![Idle](docs/ui-idle.png)
 
-Three things about this are deliberate:
+Four controls, because that is what the demo has: a preset, the global enable,
+highest quality mode, and the limiter ceiling. The global enable is a genuine
+stereo pass-through, so it is the A/B.
 
-- **The sum happens before the filter, not after.** So MIX at 0% is already the
-  mono downmix — there is no setting at which un-collapsed stereo reaches the
-  output.
-- **The mono sum is fed through *both* of FilterCore's channels.** SPREAD
-  detunes those two channels by up to ±1 octave. On a stereo module that widens
-  the image; on a mono output there is no image to widen, so collapsing after
-  the filter would leave SPREAD doing nothing. Feeding one mono signal through
-  two detuned voices and summing turns it into a second resonant peak instead —
-  same knob, same range, still audible in mono. `tests/TestChain.cpp` asserts
-  both halves of this: that anti-phase input annihilates even with SPREAD wide
-  open, and that SPREAD still changes the output by more than 6 dB.
-- **The three products are the three voicings from `fmd-vcv`**, not
-  re-implementations. Flower Child is pinned to LP12 with the AGGR switch;
-  Shaped Resonator routes grit through the resonance path (CRNCH) and exposes
-  BAND/LOW/HIGH; Super Love exposes LP6/LP12/BP/HP with grit as input noise.
+Everything else is behind **Advanced**, where every one of the five stages has
+its own visible bypass — no stage is a code-only flag.
 
-### The DSP is still the placeholder
+![Advanced](docs/ui-advanced.png)
 
-`FmdDsp.hpp` is compiled straight out of the `fmd-vcv` checkout — it is not
-vendored or copied, so the two cannot drift apart. That file is still the
-stand-in described in `fmd-vcv/README.md`: a TPT state-variable filter, **not**
-`FlowerChildFilterCore` from the `soundemoteframework` repository.
+| Preset | What it is |
+| --- | --- |
+| `RealMono_Default` | Stages 2–5 on, Stage 1 off, HQ off, ceiling −0.3 dBFS |
+| `RealMono_HighestQuality` | The same, plus the −3 dB input trim |
+| `Lab_SafeMidOnly` | Rotation off, commit set to Mid only — classic mono, the reference to A/B against |
+| `Lab_WithMonoLF` | Default plus Stage 1 at 120 Hz |
 
-When the real core lands, `FilterCore::process()` is replaced in `fmd-vcv` and
-this app inherits it on the next build. Nothing here needs to change:
-`MonoChain` only ever talks to `FilterCore` through `fmd::FilterParams`.
+Bypassing a stage passes audio through in the domain the graph expects:
+Stage 2 off leaves the plain sum (with no Side there is nothing to rotate),
+Stage 4 off leaves the rotated result in stereo as `M ± rot₊₉₀(S)`, and the
+global bypass is untouched stereo.
+
+Switching any of that mid-programme fades the output through zero for a few
+milliseconds first, holds it down while Stage 5's look-ahead buffer flushes the
+audio it committed under the old settings, and fades back in. Without the hold,
+a switch clicks exactly one look-ahead later — which is what the fade was
+supposed to prevent and did not, until it was measured.
+
+## Stage reference
+
+### Stage 0 — highest quality mode
+−3 dB at the input, so the Mid + rotated Side sum keeps its dynamics instead of
+being handed back by the limiter. Exactly 3 dB, asserted. Off by default; the
+output is 3 dB quieter, which is the point.
+
+### Stage 1 — Side high-pass (lab, bypassed)
+The client's process has no high-pass, so this ships off. It is kept because
+the brief wants it available for LF double-counting experiments, and the
+interface bypasses it rather than the code omitting it.
+
+6 / 12 / 24 dB per octave, 40–400 Hz, in two shapes. On a mono output "make the
+bass mono" and "high-pass the Side" are the same statement, so the shape
+control is what actually differs: Butterworth (−3 dB at fc) or Linkwitz-Riley
+(−6 dB at fc, the half of a crossover whose complement is the Mid-only band).
+
+### Stage 2 — M/S split
+`M = (L+R)/2`, `S = (L−R)/2`, with a gain on each. Bypassed, there is no Side,
+and the chain degrades to the classic downmix.
+
+### Stage 3 — the rotation
+Three qualities, and the trade is latency against phase linearity:
+
+| Mode | Delay at 48 kHz | Flat from | Phase |
+| --- | --- | --- | --- |
+| Linear phase, HQ (1023 taps) | 511 samples, 10.65 ms | ~120 Hz | linear |
+| Linear phase, short (255 taps) | 127 samples, 2.65 ms | ~300 Hz | linear |
+| Allpass IIR | 1 sample | 20 Hz | non-linear, shared by both paths |
+
+The linear-phase modes are a windowed type-III FIR Hilbert transformer — the
+PHA-979 behaviour, every frequency shifted by the same 90° — and the Mid path
+is delayed to match, sample-exactly.
+
+The allpass mode is a pair of four-section allpass chains whose outputs stay 90°
+apart. Neither branch is linear phase, but *both carry the same phase*, so the
+90° between Mid and Side is exact while the latency is one sample. Measured
+worst error across 20 Hz–20 kHz: **0.69°**. It is not the default because
+transients smear where the FIR's do not.
+
+Measured phase error for the FIR modes across their flat band: **0.00°**.
+
+### Stage 4 — mono commit
+`Mid + rotated Side` is the product. `Sum` (the raw reference downmix, ignoring
+the Mid gain) and `Mid only` are there to A/B against. `Side energy fold` and
+`Polarity matrix` are lab modes and are not the client's process.
+
+### Stage 5 — look-ahead limiter
+Exact sliding-maximum peak detection over the look-ahead window, so the gain is
+already down before the peak it is reducing arrives; one-pole attack at a fifth
+of the window, 100 ms release, and a final clamp so "brickwall" is true rather
+than nearly true. Ceiling −3…0 dBFS, look-ahead 5–10 ms. Latency is exactly the
+look-ahead.
 
 ## Latency
 
-Round trip is the ring buffer plus the render endpoint's own buffer. On the
-machine this was built on, at 48 kHz with a Realtek codec:
+The chain reports its own delay, and the app adds it to the round trip on
+screen rather than leaving it out of the number:
 
-| Part | Measured |
+| Part | At the shipping defaults, 48 kHz |
 | --- | --- |
 | Device period, capture / render | 10.0 / 10.0 ms |
-| Ring buffer (the `targetBufferMs` setting) | 30.0 ms |
+| Ring buffer (`targetBufferMs`) | 30.0 ms |
+| **Stage 3 rotation** | **10.65 ms** (511 samples) |
+| **Stage 5 look-ahead** | **5.00 ms** |
 | Render endpoint buffer | 22.0 ms |
-| **Round trip** | **~52 ms** |
+| **Round trip** | **~67.6 ms** |
 
-The ring target is a request, floored at one capture period plus one render
-period — below that the ring cannot survive the gap between the render thread
-draining a period and the capture thread refilling one. Add a virtual cable in
-front and its own period joins the total.
-
-The render stream asks `IAudioClient3` for the driver's minimum shared-mode
-period before falling back to the 10 ms default, which is the largest latency
-win available without going exclusive-mode. This Realtek driver reports 10 ms as
-its minimum, so there was nothing to win here; on hardware that reports 3 ms or
-less, it will take it.
+If that is too much for video, the Advanced page's quality control is where the
+15.65 ms of chain latency goes: short FIR takes it to 7.65 ms, allpass to
+5.02 ms. Add a virtual cable in front and its own period joins the total.
 
 ### Clock drift
 
 The capture and render endpoints are different devices with different crystals.
 Even when both say 48 kHz they are not the same 48 kHz, and a hundred parts per
-million of drift will empty or overflow the ring within minutes. The resampler's
-ratio is therefore trimmed by a slow proportional controller on the ring's fill
-level — hard-smoothed to about 1 Hz so it corrects the trend rather than packet
-jitter, and clamped to ±0.5% (about 8 cents) so that a controller misbehaving
-degrades to slightly-wrong-speed rather than to a chirp.
+million of drift will empty or overflow the ring within minutes. The
+resampler's ratio is therefore trimmed by a slow proportional controller on the
+ring's fill level — hard-smoothed to about 1 Hz so it corrects the trend rather
+than packet jitter, and clamped to ±0.5% (about 8 cents) so a misbehaving
+controller degrades to slightly-wrong-speed rather than to a chirp.
 
 The same mechanism handles a genuine rate mismatch, so a 44.1 kHz cable into a
 48 kHz card needs no special case.
+
+## The DSP, and RS-MET
+
+The brief asks for RS-MET (`rapt` / `rosic`) for the Hilbert transformer, the
+FIR designer and the limiter. No RS-MET checkout is present in this workspace,
+so `src/RealMono.h` is the noted fallback: published, small-footprint designs
+written to the same interfaces, so substituting the real thing is a change
+inside `RealMonoChain` and nowhere else.
+
+| Here | RS-MET equivalent |
+| --- | --- |
+| `HilbertFir` | `rapt` FIR designer + convolver |
+| `QuadratureNetwork` | `RAPT::QuadratureNetwork` |
+| `Biquad` / `HighpassChain` | `rosic` cookbook biquads, Linkwitz-Riley |
+| `LookaheadLimiter` | `rosic::Limiter` |
+
+If RS-MET is adopted, note the licence question early: it is dual-licensed, and
+a commercial Windows product may need a commercial arrangement rather than the
+GPL side. Credit to Robin Schmidt either way.
+
+Convolution with a client-supplied IR (Stage 3's `convolution_ir` in the brief)
+is **not** implemented: no IR was supplied, and a mode that cannot be exercised
+is worse than an absent one. The FIR path is where it would go.
 
 ## Building
 
 Needs Visual Studio 2022 (or Build Tools) with the C++ workload, the Windows
 SDK, and CMake 3.20+. Built and tested with MSVC 19.44 / Windows SDK 10.0.26100.
+No third-party dependency.
 
 ```sh
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
@@ -173,49 +284,58 @@ cmake --build build --config Release
 Produces `build/Release/fmd-router.exe` and `build/Release/fmd-router-tests.exe`.
 Compiles clean at `/W4 /permissive-` with no warnings.
 
-If `fmd-vcv` is not the sibling directory, point CMake at it:
-
-```sh
-cmake -S . -B build -DFMD_VCV_DIR=path/to/fmd-vcv
-```
-
 ### Tests
 
 ```sh
 build/Release/fmd-router-tests.exe        # exit code 0 = all passed
 ```
 
-27 checks over the chain, the ring and the resampler, none of which touch a
-Windows API. They cover the mono collapse, the MIX law, that the filter is
-actually in circuit and in the right mode per module, NaN safety at extreme
-settings, ring wrap and overrun reporting, sample-exactness of the resampler at
-unity ratio, and the drift controller's direction and clamp.
+71 checks over the chain, the ring and the resampler, none of which touch a
+Windows API. The ones worth knowing about:
+
+- Anti-phase input is recovered at its original level, and the app's own
+  classic-mono mode cancels the same input to −240 dB.
+- The rotation is measured, not derived: Side leads Mid by 90° across each
+  mode's band, and all three modes rotate the same way. A sign error here would
+  still sound like Real Mono on most material.
+- The Mid path is exactly the reported delay — deviation `1.5e-08` — so the two
+  paths cannot silently drift apart.
+- The limiter holds its ceiling on a 4× transient, and the reported latency
+  matches the parts it is made of at 48 and 44.1 kHz.
+- Global bypass is bit-exact stereo, and the normal output is dual mono sample
+  for sample.
+- A NaN from the capture device never reaches the endpoint, and the chain
+  recovers once it has flushed through.
 
 ## What has and has not been verified
 
 **Verified on the build machine** (Windows 10 Pro 19045, Realtek HD Audio):
 
 - Builds clean at `/W4`, both targets.
-- All 27 offline checks pass.
-- Ran Microphone → Headphones for 65 seconds at 48 kHz: **zero drops**, ring
-  held at its 30.0 ms target, drift controller converged to 1.0000× and stayed
-  there.
-- The OUT meter is driven from the samples actually written to the endpoint, and
-  it lights when the chain's own noise source is opened — so the DSP output does
-  reach the audio device.
-- Every slider, the module and mode selectors and the AGGR switch move real
-  parameters; the mode list is rebuilt per module so no module can be given a
-  mode its panel does not have.
+- All 71 offline checks pass.
+- The app starts, runs the new chain live at 48 kHz for 6 s with **zero drops**,
+  keeps the drift controller inside 0.01% of unity, and reports 15.6 ms of chain
+  latency as part of the round trip. The ring readout is sampled from the GUI
+  thread rather than at a block boundary, so it swings by up to one render
+  block either side of its 30 ms target; the drops counter is the number that
+  says whether that mattered.
+- Every control on both pages is bound to a parameter the audio thread reads,
+  and the stage bypasses grey out the controls they disable.
 
 **Not verified:**
 
+- **Audibility.** Nobody has listened to it. The numbers say the Side is
+  recovered at the right level and the right phase; they say nothing about
+  whether the client agrees it is their process.
+- **Against the client's material.** `stereo flute and mono guitar.mp3` and the
+  before/after references were not available here, so the A/B against Alex's
+  MSED + PHA-979 chain has not been run. That is the first thing to do.
 - **The VB-CABLE path itself.** No virtual cable is installed on this machine,
-  so the capture side was exercised against a physical microphone endpoint —
-  the same `IAudioClient` code path, but not the same device. This is the one
-  thing worth trying first.
-- **Audibility and taste.** Nobody has listened to it. The meters and the tests
-  say signal is flowing and being filtered; they say nothing about whether it
-  sounds good.
+  so the capture side was exercised against a physical endpoint — the same
+  `IAudioClient` code path, but not the same device.
+- **A live signal through the chain.** The 6 s run was on a silent microphone,
+  so it proves the path runs, not that it sounds right. The DSP is covered
+  offline instead.
 - **Mismatched sample rates end to end.** The resampler is unit-tested at ratios
   1.0 and 2.0, but no live 44.1 → 48 kHz pair was available to run.
 - **Other hardware.** One Realtek codec, one machine.
@@ -226,11 +346,15 @@ unity ratio, and the drift controller's direction and clamp.
   two channels are read, which are front L/R in every WAVE layout. Browsers emit
   stereo and Windows puts stereo in the front pair, so this is correct in
   practice, but a genuine 5.1 source is not downmixed properly.
-- **Mono output goes to the front pair only**; a centre speaker or LFE is fed
-  silence rather than the signal.
-- **Settings are not saved.** Device choice and every knob return to their
-  defaults on restart.
-- **The window is fixed-size** and the layout is absolute.
+- **Output goes to the front pair only**; a centre speaker or LFE is fed
+  silence rather than the signal. For multi-room the front pair is what the
+  zones take, but a centre channel would want the same feed.
+- **Settings are not saved.** Device choice, preset and every control return to
+  their defaults on restart.
+- **Stage 3's HQ mode rolls off below ~120 Hz** — a windowed FIR Hilbert cannot
+  hold 90° all the way down without more taps, and more taps is more latency.
+  Side content below that is attenuated rather than rotated. The allpass mode
+  holds 90° to 20 Hz if that matters more than linear phase.
 - **Capture needs microphone permission.** WASAPI capture is gated by Settings →
   Privacy → Microphone even for a virtual cable; if Start fails with access
   denied, that is why, and the error message says so.
