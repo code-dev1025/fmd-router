@@ -136,9 +136,15 @@ const Option kSlopes[] = {
 	{L"24 dB/oct", 24},
 };
 
+/*  Both of these high-pass the Side path and nothing else -- on a mono output
+    "make the bass mono" and "high-pass the Side" are the same operation, so
+    there is no band split to choose. What differs is the filter alignment, so
+    that is what the list is named for: Butterworth is maximally flat and -3 dB
+    at fc, Linkwitz-Riley is -6 dB at fc and is the shape that would sum flat
+    against its complement. At 6 dB/oct the two are the same filter. */
 const Option kHpfModes[] = {
-	{L"Side high-pass (Butterworth)", HpfSide},
-	{L"Crossover to mono (LR)", HpfCrossoverMono},
+	{L"Butterworth", HpfSide},
+	{L"Linkwitz-Riley", HpfCrossoverMono},
 };
 
 
@@ -708,9 +714,11 @@ void buildMainPanel() {
 
 	g.enableCheck = child(L"BUTTON", L"Real Mono processing   (off = stereo pass-through)",
 	                      BS_AUTOCHECKBOX | WS_TABSTOP, 26, 256, 440, 22, IDC_ENABLE);
-	g.hqCheck = child(L"BUTTON", L"Highest quality mode   (\x2212""3 dB input, keeps the "
-	                             L"dynamics under the sum)",
-	                  BS_AUTOCHECKBOX | WS_TABSTOP, 26, 284, 500, 22, IDC_HQ);
+	// Sized to the label: a checkbox is clickable across its whole width, and a
+	// 500 px one behind four characters of text toggles when you click nowhere
+	// near it.
+	g.hqCheck = child(L"BUTTON", L"\x2212""3 dB",
+	                  BS_AUTOCHECKBOX | WS_TABSTOP, 26, 284, 90, 22, IDC_HQ);
 
 	child(L"STATIC", L"Ceiling", SS_LEFT, 26, 316, 60, 20, -1);
 	makeSlider(SL_CEILING, 90, 312, 300, false);
@@ -741,12 +749,14 @@ void buildAdvanced() {
 
 	// One line that fits on one line: this static clips rather than wraps.
 	advChild(L"STATIC",
-	         L"Defaults follow the client's DAW recipe. Stage 1 is off because it has none.",
+	         L"Stage 1 high-passes the Side path so the bass stays mono. Off by default.",
 	         SS_LEFT, 26, 620, 606, 18, -1);
 
 	// ------------------------------------------------------------- Stage 1
-	g.s1Enable = advChild(L"BUTTON", L"Stage 1   Side high-pass   (lab, off)",
-	                      BS_AUTOCHECKBOX | WS_TABSTOP, 26, 644, 300, 22, IDC_S1_ENABLE);
+	// No "(off)" in the label: the checkbox already says whether it is on, and
+	// a label that says otherwise the moment it is ticked is worse than none.
+	g.s1Enable = advChild(L"BUTTON", L"Stage 1   Side high-pass",
+	                      BS_AUTOCHECKBOX | WS_TABSTOP, 26, 644, 200, 22, IDC_S1_ENABLE);
 	advChild(L"STATIC", L"Fc", SS_LEFT, 340, 646, 24, 20, -1);
 	makeSlider(SL_HPF_FC, 366, 642, 160, true);
 	g.sliderValues[SL_HPF_FC] = advChild(L"STATIC", L"", SS_LEFT, 534, 646, 90, 20,
@@ -759,7 +769,7 @@ void buildAdvanced() {
 
 	advChild(L"STATIC", L"Shape:", SS_LEFT, 212, 672, 50, 20, -1);
 	g.s1Mode = advChild(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP,
-	                    266, 668, 240, 200, IDC_S1_MODE);
+	                    266, 668, 160, 200, IDC_S1_MODE);
 	fillOptions(g.s1Mode, kHpfModes);
 
 	// ------------------------------------------------------------- Stage 2
@@ -784,8 +794,8 @@ void buildAdvanced() {
 	fillOptions(g.s3Quality, kQualities);
 
 	// ------------------------------------------------------------- Stage 4
-	g.s4Enable = advChild(L"BUTTON", L"Stage 4   Mono commit",
-	                      BS_AUTOCHECKBOX | WS_TABSTOP, 26, 784, 200, 22, IDC_S4_ENABLE);
+	g.s4Enable = advChild(L"BUTTON", L"Stage 4   Mono sum",
+	                      BS_AUTOCHECKBOX | WS_TABSTOP, 26, 784, 170, 22, IDC_S4_ENABLE);
 	advChild(L"STATIC", L"Mode:", SS_LEFT, 240, 786, 46, 20, -1);
 	g.s4Mode = advChild(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP,
 	                    290, 782, 250, 200, IDC_S4_MODE);
@@ -802,8 +812,8 @@ void buildAdvanced() {
 	                                     IDC_SLIDER_VALUE_BASE + SL_OUTPUT);
 
 	// ------------------------------------------------------------- Stage 5
-	g.s5Enable = advChild(L"BUTTON", L"Stage 5   Look-ahead limiter",
-	                      BS_AUTOCHECKBOX | WS_TABSTOP, 26, 842, 240, 22, IDC_S5_ENABLE);
+	g.s5Enable = advChild(L"BUTTON", L"Stage 5   Limiter",
+	                      BS_AUTOCHECKBOX | WS_TABSTOP, 26, 842, 150, 22, IDC_S5_ENABLE);
 	advChild(L"STATIC", L"Look-ahead", SS_LEFT, 280, 844, 80, 20, -1);
 	makeSlider(SL_LOOKAHEAD, 364, 840, 160, true);
 	g.sliderValues[SL_LOOKAHEAD] = advChild(L"STATIC", L"", SS_LEFT, 532, 844, 90, 20,
