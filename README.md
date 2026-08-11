@@ -122,14 +122,50 @@ Input*.
 
 ### Trying it without installing anything
 
-Tick **Loopback** and the source list becomes your *playback* devices; the app
-taps one of them instead of a capture endpoint. This is good for auditioning
-the chain, but it is not interception — you hear the original alongside the
-mono version, because the original is still going to a real speaker.
+**Take audio from** offers three sources, and only the first needs the cable:
+
+| Source | What it does |
+| --- | --- |
+| **Device** | Captures a real endpoint — the cable, as set up above. This is the product. |
+| **Loopback** | Taps a *playback* device instead. Good for auditioning, but not interception: you hear the original alongside the mono version, because the original is still going to a real speaker. |
+| **File** | Plays a file straight through the chain. No cable, no second endpoint, nothing else running. |
 
 Pointing loopback at the same device you render to is refused rather than
 warned about: it is a feedback loop that reaches full scale in well under a
 second.
+
+### Playing a file through it
+
+![File source](docs/ui-file.png)
+
+Pick **File**, press *Choose file…*, press *Play*. The file goes through the
+same ring, resampler and `RealMonoChain` a live capture does — it is a source,
+not a separate code path — so what you hear is what the app would have played
+had the audio arrived down a cable. It plays to whatever *Play processed to* is
+set to, and the status line shows the position.
+
+| Format | How |
+| --- | --- |
+| **WAV** | This project's own RIFF reader, the one `realmono-wav` uses. 8/16/24/32-bit PCM and 32-bit float. |
+| **MP3, FLAC, M4A/AAC, WMA** | Windows' own codecs, via Media Foundation. |
+| **Ogg Vorbis** | Only if *Web Media Extensions* is installed — see below. |
+
+**Loop** is on by default and is live: leave it looping and toggle *Real Mono
+processing* while it plays, which is the A/B the whole app exists for. Turn it
+off mid-pass and the file is allowed to end, and the app stops itself.
+
+Two things worth knowing. The file is decoded into memory in one go, so there
+is a **ten-minute ceiling** — longer files load their first ten minutes and say
+so, and the whole file is `realmono-wav`'s job anyway. And because a file has
+no crystal to drift against, the drift controller is switched off for it: the
+resample ratio is exactly rate-in over rate-out, so a 44.1 kHz file into a
+48 kHz card plays at 0.918750 and stays there. Nothing invents pitch error on
+the one source you can compare against a reference note for note.
+
+Ogg Vorbis is the one format Windows does not always have. If it is missing the
+app says so and names the fix: install **Web Media Extensions** from the
+Microsoft Store (it ships with Windows 10 1809 and later, but is absent on some
+installs), or convert the file. Everything else works out of the box.
 
 ## The interface
 
@@ -138,6 +174,11 @@ second.
 Four controls, because that is what the demo has: a preset, the global enable,
 highest quality mode, and the limiter ceiling. The global enable is a genuine
 stereo pass-through, so it is the A/B.
+
+The routing row above them is one line because the three sources are mutually
+exclusive: the row underneath it changes meaning with the choice — an endpoint
+list, or the file being played — and the banner explains whichever one is
+showing, so neither needs a row of its own.
 
 Everything else is behind **Advanced**, where every one of the five stages has
 its own visible bypass — no stage is a code-only flag.
@@ -274,7 +315,9 @@ is worse than an absent one. The FIR path is where it would go.
 
 Needs Visual Studio 2022 (or Build Tools) with the C++ workload, the Windows
 SDK, and CMake 3.20+. Built and tested with MSVC 19.44 / Windows SDK 10.0.26100.
-No third-party dependency.
+No third-party dependency: the DSP is all in `src/RealMono.h`, and the file
+player's compressed formats go through Windows' own Media Foundation codecs
+rather than a vendored decoder.
 
 ```sh
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
@@ -342,11 +385,16 @@ sum against the −6 dB linear one. The fourth is the case that matters on real
 programme material — a mono bass with a widened top, where the top is what goes
 missing.
 
-The client's test file is an MP3, so convert first:
+`realmono-wav` reads WAV only, and stays portable that way — it shares
+`src/AudioFile.h` with the app, so the two agree sample for sample on the
+format the validation actually uses. To run an MP3 through it, convert first:
 
 ```sh
 ffmpeg -i "stereo flute and mono guitar.mp3" -c:a pcm_s24le test.wav
 ```
+
+To simply *hear* an MP3 through the chain there is nothing to convert — use the
+app's **File** source, which decodes it with Windows' own codecs.
 
 ## What has and has not been verified
 
@@ -367,6 +415,15 @@ ffmpeg -i "stereo flute and mono guitar.mp3" -c:a pcm_s24le test.wav
 - End to end on a file: the `--demo` signal through `realmono-wav` gives the
   table above, dual mono on every frame, and latency compensation exact to
   0.00000.
+- **The File source, live.** A 48 kHz WAV and a 44.1 kHz MP3 were both decoded
+  and played through the real engine — file thread, ring, resampler, chain,
+  WASAPI render — for six seconds each, with **zero underruns and zero
+  overruns**. The 44.1 → 48 kHz case held its ratio at exactly 0.918750 for the
+  whole run, which is the drift controller correctly staying out of the way. A
+  0.41 s file with looping off ended, reported it, and stopped the engine
+  cleanly.
+- **The decoders present on this machine**, enumerated through `MFTEnumEx`:
+  MP3, AAC, WMA and FLAC all registered. Ogg Vorbis is **not** — see below.
 
 **Not verified:**
 
@@ -377,14 +434,15 @@ ffmpeg -i "stereo flute and mono guitar.mp3" -c:a pcm_s24le test.wav
   before/after references were not available here, so the A/B against Alex's
   MSED + PHA-979 chain has not been run. That is the first thing to do, and
   `realmono-wav` is the tool for it.
-- **The VB-CABLE path itself.** No virtual cable is installed on this machine,
-  so the capture side was exercised against a physical endpoint — the same
-  `IAudioClient` code path, but not the same device.
-- **A live signal through the chain.** The 6 s run was on a silent microphone,
-  so it proves the path runs, not that it sounds right. The DSP is covered
-  offline instead.
-- **Mismatched sample rates end to end.** The resampler is unit-tested at ratios
-  1.0 and 2.0, but no live 44.1 → 48 kHz pair was available to run.
+- **The VB-CABLE path end to end.** VB-CABLE *is* installed on this machine and
+  the app opens *CABLE Output* and runs against it with no drops, but nothing
+  has been played into the cable from another application, so the full
+  browser → cable → app → speakers route is still unexercised.
+- **Ogg Vorbis.** Windows has no Vorbis decoder on this machine, so that branch
+  has only been seen failing — with the right message, naming *Web Media
+  Extensions*, which is the fix. Every other format decodes.
+- **Audio quality of the File source by ear.** It runs without dropping a
+  sample; nobody has listened to it.
 - **Other hardware.** One Realtek codec, one machine.
 
 ## Known limits
@@ -396,8 +454,12 @@ ffmpeg -i "stereo flute and mono guitar.mp3" -c:a pcm_s24le test.wav
 - **Output goes to the front pair only**; a centre speaker or LFE is fed
   silence rather than the signal. For multi-room the front pair is what the
   zones take, but a centre channel would want the same feed.
-- **Settings are not saved.** Device choice, preset and every control return to
-  their defaults on restart.
+- **Settings are not saved.** Device choice, preset, the chosen file and every
+  control return to their defaults on restart.
+- **The File source has no seek or pause.** Play, loop and stop, which is what
+  an A/B needs; it is a test player, not a media player.
+- **Files are held in memory, capped at ten minutes.** A longer one loads its
+  first ten minutes and says so. `realmono-wav` has no such limit.
 - **Stage 3's HQ mode rolls off below ~120 Hz** — a windowed FIR Hilbert cannot
   hold 90° all the way down without more taps, and more taps is more latency.
   Side content below that is attenuated rather than rotated. The allpass mode

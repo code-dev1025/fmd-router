@@ -1,6 +1,7 @@
 #include "Engine.h"
 
 #include "Devices.h"
+#include "MediaFile.h"
 
 #include <audioclient.h>
 #include <avrt.h>
@@ -132,15 +133,26 @@ bool Engine::start(const EngineConfig& cfg, std::wstring& err) {
 	correlation_.store(0.f, std::memory_order_relaxed);
 	minLimiterGain_.store(1.f, std::memory_order_relaxed);
 	chainLatencyFrames_.store(0, std::memory_order_relaxed);
+	ringTargetFrames_.store(0.0, std::memory_order_relaxed);
+	filePosition_.store(0, std::memory_order_relaxed);
+	fileEnded_.store(false, std::memory_order_relaxed);
+	loopFile_.store(cfg.loopFile, std::memory_order_relaxed);
 	{
 		std::lock_guard<std::mutex> lock(errorMutex_);
 		asyncError_.clear();
 	}
 
+	if (cfg.fromFile && file_.frames() == 0) {
+		err = L"No audio file is loaded.";
+		return false;
+	}
+
 	// Capture first: it sizes the ring and establishes the source rate, both of
 	// which the render thread needs before it can set its resampling ratio.
+	// A file source stands in for it and honours the same contract.
 	Ready captureReady;
-	capture_ = std::thread(&Engine::captureThread, this, cfg, &captureReady);
+	capture_ = std::thread(cfg.fromFile ? &Engine::fileThread : &Engine::captureThread,
+	                       this, cfg, &captureReady);
 	if (!waitReady(captureReady, err)) {
 		quit_.store(true, std::memory_order_release);
 		if (capture_.joinable())
@@ -195,6 +207,12 @@ EngineStats Engine::stats() {
 	s.correlation = correlation_.load(std::memory_order_relaxed);
 	s.gainReductionDb = gainToDb(minLimiterGain_.exchange(1.f, std::memory_order_relaxed));
 
+	s.fileEnded = fileEnded_.load(std::memory_order_relaxed);
+	if (file_.sampleRate > 0) {
+		s.filePositionSeconds = double(filePosition_.load(std::memory_order_relaxed))
+		                      / double(file_.sampleRate);
+	}
+
 	if (s.captureRate > 0) {
 		s.ringMs = 1000.0 * double(ring_.availableApprox()) / double(s.captureRate);
 		s.roundTripMs = s.ringMs;
@@ -223,6 +241,156 @@ double Engine::processingLatencyMs() const {
 	if (rate == 0)
 		return 0.0;
 	return 1000.0 * double(chainLatencyFrames_.load(std::memory_order_relaxed)) / double(rate);
+}
+
+
+bool Engine::loadFile(const std::wstring& path, std::wstring& err) {
+	if (running()) {
+		err = L"Stop playback before loading another file.";
+		return false;
+	}
+
+	AudioBuffer loaded;
+	std::wstring message;
+	bool ok = false;
+
+	// Media Foundation wants the multithreaded apartment and the GUI thread is
+	// deliberately an STA, so the decode gets a thread of its own. Joining it
+	// immediately keeps loadFile synchronous, which is what the caller wants:
+	// the file is either there and describable or it is not.
+	std::thread worker([&] {
+		ComScope com;
+		ok = loadAudioFile(path, loaded, message);
+	});
+	worker.join();
+
+	err = message;
+	if (!ok)
+		return false;
+
+	file_ = std::move(loaded);
+	filePath_ = path;
+	filePosition_.store(0, std::memory_order_relaxed);
+	fileEnded_.store(false, std::memory_order_relaxed);
+	return true;
+}
+
+
+Engine::FileInfo Engine::fileInfo() const {
+	FileInfo info;
+	info.path = filePath_;
+	info.name = media::fileNameOf(filePath_);
+	info.sampleRate = file_.sampleRate;
+	info.frames = file_.frames();
+	info.seconds = file_.seconds();
+	info.loaded = info.frames > 0;
+	return info;
+}
+
+
+void Engine::fileThread(EngineConfig cfg, Ready* readyPtr) {
+	Ready& ready = *readyPtr;
+
+	// No COM and no device: the file is already decoded, and all this thread
+	// does is meter it and keep the ring topped up. It exists as a thread at
+	// all so that the render side cannot tell a file from a cable.
+	const AudioBuffer& file = file_;
+	const size_t frames = file.frames();
+	const uint32_t rate = file.sampleRate;
+	if (frames == 0 || rate == 0) {
+		setReady(ready, false, L"No audio file is loaded.");
+		return;
+	}
+
+	ring_.reset(std::max<size_t>(rate, 4096));
+	ring_.clear();
+
+	// The render thread sizes the ring's floor from the capture period. A file
+	// has no device period, so it is told the one this thread actually refills
+	// at -- 10 ms, which is the Windows engine default and comfortably more
+	// than the 2 ms sleep below.
+	capturePeriodFrames_.store(std::max<uint32_t>(rate / 100, 1), std::memory_order_relaxed);
+	captureRate_.store(rate, std::memory_order_relaxed);
+	captureChannels_.store(2, std::memory_order_relaxed);
+
+	setReady(ready, true, std::wstring());
+
+	// 2048 frames is a comfortable bite at any rate and keeps the scratch in
+	// cache; the loop below takes as many bites as the ring has room for.
+	std::vector<float> scratch(2048 * 2, 0.f);
+	size_t pos = 0;
+	bool ended = false;          // the file ran out and looping is off
+	size_t silenceAfterEnd = 0;  // frames of tail pushed since then
+
+	ProAudioPriority priority;
+
+	while (!quit_.load(std::memory_order_acquire)) {
+		// Aim at exactly the fill the render thread is holding for, so its
+		// drift controller -- which is frozen in file mode anyway, there being
+		// no second clock to drift against -- sees the number it expects.
+		double target = ringTargetFrames_.load(std::memory_order_relaxed);
+		if (target <= 0.0)
+			target = cfg.targetBufferMs * 0.001 * double(rate);
+
+		const size_t available = ring_.availableRead();
+		size_t room = (available < size_t(target)) ? size_t(target) - available : 0;
+		room = std::min(room, ring_.availableWrite());
+
+		while (room > 0) {
+			const size_t chunk = std::min(room, scratch.size() / 2);
+			float peakL = 0.f, peakR = 0.f;
+			size_t n = 0;
+
+			for (; n < chunk; n++) {
+				if (pos >= frames) {
+					if (!loopFile_.load(std::memory_order_relaxed)) {
+						ended = true;
+						break;
+					}
+					pos = 0;
+				}
+				const float l = file.l[pos];
+				const float r = file.r[pos];
+				scratch[n * 2] = l;
+				scratch[n * 2 + 1] = r;
+				peakL = std::max(peakL, std::abs(l));
+				peakR = std::max(peakR, std::abs(r));
+				pos++;
+			}
+			// A file that has run out still has to hand over frames, or the
+			// render side would underrun and stutter instead of going quiet.
+			for (size_t i = n; i < chunk; i++) {
+				scratch[i * 2] = 0.f;
+				scratch[i * 2 + 1] = 0.f;
+			}
+			if (ended)
+				silenceAfterEnd += chunk - n;
+
+			// Same read-and-clear peak publication the capture thread uses, so
+			// the IN meters read the same way whatever the source is.
+			float prev = inPeakL_.load(std::memory_order_relaxed);
+			while (peakL > prev
+			       && !inPeakL_.compare_exchange_weak(prev, peakL, std::memory_order_relaxed))
+				;
+			prev = inPeakR_.load(std::memory_order_relaxed);
+			while (peakR > prev
+			       && !inPeakR_.compare_exchange_weak(prev, peakR, std::memory_order_relaxed))
+				;
+
+			room -= ring_.push(scratch.data(), chunk);
+		}
+
+		filePosition_.store(pos, std::memory_order_relaxed);
+
+		// Announce the end only once the tail has had time to reach the
+		// speakers: the ring, the chain's look-ahead and the endpoint buffer
+		// all sit between here and the last audible sample, and stopping the
+		// moment the file pointer runs out would clip it.
+		if (ended && silenceAfterEnd >= size_t(rate) / 2)
+			fileEnded_.store(true, std::memory_order_release);
+
+		Sleep(2);
+	}
 }
 
 
@@ -536,6 +704,8 @@ void Engine::renderThread(EngineConfig cfg, Ready* readyPtr) {
 	double targetFrames = cfg.targetBufferMs * 0.001 * double(captureRate);
 	targetFrames = std::max(targetFrames, floorFrames);
 	targetFrames = std::min(targetFrames, double(ring_.capacity()) * 0.5);
+	// Only a file producer reads this, and only so it can aim at the same fill.
+	ringTargetFrames_.store(targetFrames, std::memory_order_release);
 
 	const double baseRatio = double(captureRate) / double(fmt.sampleRate);
 	const double blockRateHz = double(fmt.sampleRate) / double(bufferFrames);
@@ -669,7 +839,14 @@ void Engine::renderThread(EngineConfig cfg, Ready* readyPtr) {
 			// One drift correction per block. Frozen while priming, because the
 			// fill is deliberately abnormal then and feeding that to the
 			// controller would wind it up against a condition it cannot fix.
-			if (!priming) {
+			//
+			// Also frozen for a file, and that is not an optimisation: drift
+			// correction exists because two crystals disagree, and a file has
+			// no crystal. Its ratio is exactly rate-in over rate-out, so
+			// letting the controller trim it would trade a real 0 cents for up
+			// to 8 cents of invented pitch error on the one source that can be
+			// compared against the client's references note for note.
+			if (!priming && !cfg.fromFile) {
 				const double ratio = drift_.update(double(ring_.availableRead()));
 				resampler_.setRatio(ratio);
 				ratio_.store(ratio, std::memory_order_relaxed);

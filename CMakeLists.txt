@@ -8,7 +8,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # The chain has no third-party dependency: the Hilbert transformer, the
 # quadrature network, the filters and the limiter are all in src/RealMono.h.
-# See the header for the RS-MET classes each one stands in for.
+# See the header for the RS-MET classes each one stands in for. The file
+# player's compressed formats go through Windows' own codecs (Media Foundation)
+# rather than a vendored decoder, so that stays true.
 
 # Only the host is Windows-only. The chain, its tests and the offline WAV tool
 # are portable, and are worth being able to build and run anywhere -- so the
@@ -33,6 +35,13 @@ if(WIN32)
         ole32       # COM, and the device enumerator
         avrt        # MMCSS, for Pro Audio thread priority
         comctl32    # trackbars
+        comdlg32    # the file-open dialog
+        # Media Foundation, for the file player's mp3/ogg/flac/m4a decoding.
+        # These are Windows' own codecs, not a third-party dependency: see the
+        # note at the top of src/MediaFile.h for why that was the choice.
+        mfplat
+        mfreadwrite
+        mfuuid
     )
 
     if(MSVC)

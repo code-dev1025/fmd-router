@@ -20,13 +20,13 @@
     No Windows API here: this is portable C++ and builds anywhere the chain
     does.                                                                     */
 
+#include "AudioFile.h"
 #include "RealMonoChain.h"
 
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <string>
 #include <vector>
 
@@ -34,235 +34,14 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
-// ------------------------------------------------------------------ WAV I/O
-
-struct Audio {
-	uint32_t sampleRate = 48000;
-	int bits = 24;
-	bool isFloat = false;
-	std::vector<float> l;
-	std::vector<float> r;
-
-	size_t frames() const { return l.size(); }
-};
-
-uint32_t readU32(const uint8_t* p) {
-	return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
-}
-
-uint16_t readU16(const uint8_t* p) {
-	return uint16_t(uint16_t(p[0]) | (uint16_t(p[1]) << 8));
-}
-
-void writeU32(std::ofstream& out, uint32_t v) {
-	const uint8_t b[4] = {uint8_t(v), uint8_t(v >> 8), uint8_t(v >> 16), uint8_t(v >> 24)};
-	out.write(reinterpret_cast<const char*>(b), 4);
-}
-
-void writeU16(std::ofstream& out, uint16_t v) {
-	const uint8_t b[2] = {uint8_t(v), uint8_t(v >> 8)};
-	out.write(reinterpret_cast<const char*>(b), 2);
-}
-
-/** One interleaved sample -> float, matching the engine's own scaling. */
-float decode(const uint8_t* p, int bits, bool isFloat) {
-	if (isFloat) {
-		float v = 0.f;
-		std::memcpy(&v, p, sizeof(v));
-		return v;
-	}
-	switch (bits) {
-		case 8:
-			// 8-bit WAV is unsigned, unlike every other width.
-			return (float(p[0]) - 128.f) * (1.f / 128.f);
-		case 16:
-			return float(int16_t(readU16(p))) * (1.f / 32768.f);
-		case 24: {
-			const int32_t v = int32_t((uint32_t(p[0]) << 8) | (uint32_t(p[1]) << 16)
-			                          | (uint32_t(p[2]) << 24));
-			return float(v) * (1.f / 2147483648.f);
-		}
-		case 32:
-			return float(int32_t(readU32(p))) * (1.f / 2147483648.f);
-		default:
-			return 0.f;
-	}
-}
-
-bool readWav(const std::string& path, Audio& audio, std::string& err) {
-	std::ifstream in(path, std::ios::binary);
-	if (!in) {
-		err = "could not open " + path;
-		return false;
-	}
-	std::vector<uint8_t> file((std::istreambuf_iterator<char>(in)),
-	                          std::istreambuf_iterator<char>());
-	if (file.size() < 44 || std::memcmp(file.data(), "RIFF", 4) != 0
-	    || std::memcmp(file.data() + 8, "WAVE", 4) != 0) {
-		err = path + " is not a RIFF/WAVE file";
-		return false;
-	}
-
-	uint16_t channels = 0;
-	uint16_t tag = 0;
-	bool haveFmt = false;
-	size_t dataAt = 0, dataSize = 0;
-
-	// Walk the chunks rather than assuming the canonical 44-byte layout: real
-	// files carry LIST, fact and JUNK chunks in any order.
-	size_t pos = 12;
-	while (pos + 8 <= file.size()) {
-		const uint8_t* id = file.data() + pos;
-		const uint32_t size = readU32(file.data() + pos + 4);
-		const size_t body = pos + 8;
-		if (body + size > file.size() && std::memcmp(id, "data", 4) != 0)
-			break;
-
-		if (std::memcmp(id, "fmt ", 4) == 0 && size >= 16) {
-			tag = readU16(file.data() + body);
-			channels = readU16(file.data() + body + 2);
-			audio.sampleRate = readU32(file.data() + body + 4);
-			audio.bits = int(readU16(file.data() + body + 14));
-			if (tag == 0xFFFE && size >= 40) {
-				// WAVE_FORMAT_EXTENSIBLE: the real format is the first two
-				// bytes of the sub-format GUID.
-				tag = readU16(file.data() + body + 24);
-			}
-			haveFmt = true;
-		}
-		else if (std::memcmp(id, "data", 4) == 0) {
-			dataAt = body;
-			dataSize = size;
-			// A truncated or streaming file can claim more than it has.
-			if (dataAt + dataSize > file.size())
-				dataSize = file.size() - dataAt;
-		}
-
-		pos = body + size + (size & 1);  // chunks are word-aligned
-	}
-
-	if (!haveFmt || dataAt == 0) {
-		err = path + " has no fmt or data chunk";
-		return false;
-	}
-	audio.isFloat = (tag == 3);
-	if (tag != 1 && tag != 3) {
-		err = path + ": only PCM and IEEE float WAV are supported (this one is "
-		    + std::to_string(tag) + "). Convert it first, e.g. "
-		      "ffmpeg -i in.mp3 -c:a pcm_s24le out.wav";
-		return false;
-	}
-	if (audio.isFloat && audio.bits != 32) {
-		err = path + ": only 32-bit float is supported";
-		return false;
-	}
-	if (!audio.isFloat && audio.bits != 8 && audio.bits != 16 && audio.bits != 24
-	    && audio.bits != 32) {
-		err = path + ": unsupported bit depth " + std::to_string(audio.bits);
-		return false;
-	}
-	if (channels < 1) {
-		err = path + ": no channels";
-		return false;
-	}
-
-	const size_t sampleBytes = size_t(audio.bits) / 8;
-	const size_t frameBytes = sampleBytes * channels;
-	const size_t frames = frameBytes ? (dataSize / frameBytes) : 0;
-	audio.l.resize(frames);
-	audio.r.resize(frames);
-
-	// More than two channels: take the front pair, as the engine does.
-	const size_t rightIndex = (channels > 1) ? 1 : 0;
-	for (size_t i = 0; i < frames; i++) {
-		const uint8_t* frame = file.data() + dataAt + i * frameBytes;
-		audio.l[i] = decode(frame, audio.bits, audio.isFloat);
-		audio.r[i] = decode(frame + rightIndex * sampleBytes, audio.bits, audio.isFloat);
-	}
-	return true;
-}
-
-void encode(std::ofstream& out, float v, int bits, bool isFloat) {
-	if (isFloat) {
-		out.write(reinterpret_cast<const char*>(&v), sizeof(v));
-		return;
-	}
-	if (v > 1.f) v = 1.f;
-	if (v < -1.f) v = -1.f;
-	switch (bits) {
-		case 16:
-			writeU16(out, uint16_t(int16_t(v * 32767.f)));
-			break;
-		case 24: {
-			const int32_t s = int32_t(v * 8388607.f);
-			const uint8_t b[3] = {uint8_t(s & 0xff), uint8_t((s >> 8) & 0xff),
-			                      uint8_t((s >> 16) & 0xff)};
-			out.write(reinterpret_cast<const char*>(b), 3);
-			break;
-		}
-		default:
-			writeU32(out, uint32_t(int32_t(double(v) * 2147483647.0)));
-			break;
-	}
-}
-
-bool writeWav(const std::string& path, const std::vector<float>& l, const std::vector<float>& r,
-              bool monoOut, uint32_t sampleRate, int bits, bool isFloat, std::string& err) {
-	std::ofstream out(path, std::ios::binary);
-	if (!out) {
-		err = "could not write " + path;
-		return false;
-	}
-	const uint16_t channels = monoOut ? 1 : 2;
-	const uint16_t sampleBytes = uint16_t(bits / 8);
-	const uint16_t blockAlign = uint16_t(sampleBytes * channels);
-	const uint32_t dataBytes = uint32_t(l.size()) * blockAlign;
-	// Float files want the 18-byte fmt chunk and a fact chunk; integer files
-	// take the plain 16-byte one.
-	const uint32_t fmtSize = isFloat ? 18u : 16u;
-	const uint32_t factSize = isFloat ? 12u : 0u;
-
-	out.write("RIFF", 4);
-	writeU32(out, 4 + (8 + fmtSize) + factSize + 8 + dataBytes);
-	out.write("WAVE", 4);
-
-	out.write("fmt ", 4);
-	writeU32(out, fmtSize);
-	writeU16(out, isFloat ? 3 : 1);
-	writeU16(out, channels);
-	writeU32(out, sampleRate);
-	writeU32(out, sampleRate * blockAlign);
-	writeU16(out, blockAlign);
-	writeU16(out, uint16_t(bits));
-	if (isFloat)
-		writeU16(out, 0);  // cbSize
-
-	if (isFloat) {
-		out.write("fact", 4);
-		writeU32(out, 4);
-		writeU32(out, uint32_t(l.size()));
-	}
-
-	out.write("data", 4);
-	writeU32(out, dataBytes);
-	for (size_t i = 0; i < l.size(); i++) {
-		if (monoOut) {
-			encode(out, 0.5f * (l[i] + r[i]), bits, isFloat);
-		}
-		else {
-			encode(out, l[i], bits, isFloat);
-			encode(out, r[i], bits, isFloat);
-		}
-	}
-	return out.good();
-}
+using fmdr::AudioBuffer;
 
 
 // ------------------------------------------------------------- demo signal
 
 /** A file that makes the difference obvious: four sections, each three
     seconds, with the case that matters in the middle. */
-void makeDemo(Audio& audio) {
+void makeDemo(AudioBuffer& audio) {
 	audio.sampleRate = 48000;
 	audio.bits = 24;
 	audio.isFloat = false;
@@ -383,9 +162,10 @@ int main(int argc, char** argv) {
 			std::printf("--demo needs an output path\n");
 			return 1;
 		}
-		Audio demo;
+		AudioBuffer demo;
 		makeDemo(demo);
-		if (!writeWav(argv[2], demo.l, demo.r, false, demo.sampleRate, demo.bits, demo.isFloat, err)) {
+		if (!fmdr::writeWav(argv[2], demo.l, demo.r, false, demo.sampleRate, demo.bits,
+		                    demo.isFloat, err)) {
 			std::printf("error: %s\n", err.c_str());
 			return 1;
 		}
@@ -458,9 +238,13 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	Audio in;
-	if (!readWav(inPath, in, err)) {
-		std::printf("error: %s\n", err.c_str());
+	AudioBuffer in;
+	if (!fmdr::readWav(inPath, in, err)) {
+		// The reader does not know which file it was handed, so the path is
+		// added here rather than repeated inside every message it can produce.
+		std::printf("error: %s: %s\n", inPath.c_str(), err.c_str());
+		if (err.find("only PCM") != std::string::npos)
+			std::printf("  convert it first, e.g. ffmpeg -i in.mp3 -c:a pcm_s24le out.wav\n");
 		return 1;
 	}
 	if (in.frames() == 0) {
@@ -506,7 +290,7 @@ int main(int argc, char** argv) {
 
 	const int bits = forceFloat ? 32 : in.bits;
 	const bool isFloat = forceFloat ? true : in.isFloat;
-	if (!writeWav(outPath, outL, outR, monoOut, in.sampleRate, bits, isFloat, err)) {
+	if (!fmdr::writeWav(outPath, outL, outR, monoOut, in.sampleRate, bits, isFloat, err)) {
 		std::printf("error: %s\n", err.c_str());
 		return 1;
 	}

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AudioFile.h"
 #include "AudioFormat.h"
 #include "Com.h"
 #include "RealMonoChain.h"
@@ -25,6 +26,15 @@ struct EngineConfig {
 	    cable installed -- but the user then hears the unprocessed audio too,
 	    which is exactly what the cable exists to prevent. */
 	bool loopback = false;
+	/** Take audio from the file loaded by loadFile() rather than from an
+	    endpoint. captureId and loopback are then unused. This is the path that
+	    lets the chain be judged by ear with nothing else installed: no cable,
+	    no second endpoint, and no third application playing. */
+	bool fromFile = false;
+	/** Restart the file at its end instead of stopping. On by default, because
+	    the A/B this exists for is "toggle the processing while it plays" and a
+	    file that stops after one pass makes that a chore. */
+	bool loopFile = true;
 	/** How much audio to hold in the ring, in milliseconds. The floor is
 	    raised automatically to whatever the two devices' buffers require. */
 	double targetBufferMs = 30.0;
@@ -57,6 +67,13 @@ struct EngineStats {
 	float sidePeak = 0.f;
 	float correlation = 0.f;
 	float gainReductionDb = 0.f;  // most reduction since the last read, <= 0
+
+	// File playback. Position is where the file is being read, which leads
+	// what is audible by the round trip -- close enough for a clock in a
+	// status line, and it is not pretending to be anything else.
+	double filePositionSeconds = 0.0;
+	/** Set once a non-looping file has played out, so the GUI can stop. */
+	bool fileEnded = false;
 };
 
 
@@ -82,6 +99,33 @@ public:
 
 	bool start(const EngineConfig& cfg, std::wstring& err);
 	void stop();
+
+	/** Decodes a file into memory, ready for a `fromFile` start. Blocks for as
+	    long as the decode takes, so it belongs on the GUI thread with a wait
+	    cursor up, not on an audio thread. Refused while running: the file is
+	    the thing being read, and swapping it under the reader is not worth the
+	    lock it would cost.
+
+	    Returns true with a non-empty `err` when the file loaded but something
+	    about it is worth saying -- it was too long and got trimmed, so far. */
+	bool loadFile(const std::wstring& path, std::wstring& err);
+
+	struct FileInfo {
+		std::wstring path;
+		std::wstring name;      // the last path component, for the UI
+		uint32_t sampleRate = 0;
+		size_t frames = 0;
+		double seconds = 0.0;
+		bool loaded = false;
+	};
+
+	FileInfo fileInfo() const;
+
+	/** Live, unlike the rest of EngineConfig: turning looping off part way
+	    through a pass is how you let a file end without stopping it dead. */
+	void setLoopFile(bool loop) {
+		loopFile_.store(loop, std::memory_order_relaxed);
+	}
 
 	bool running() const {
 		return running_.load(std::memory_order_acquire);
@@ -111,6 +155,9 @@ private:
 	};
 
 	void captureThread(EngineConfig cfg, Ready* ready);
+	/** Stands in for captureThread when the source is a file: same ring, same
+	    metering, same contract with the render thread. */
+	void fileThread(EngineConfig cfg, Ready* ready);
 	void renderThread(EngineConfig cfg, Ready* ready);
 	void raiseAsyncError(std::wstring message);
 	/** Called once by each thread, on success or on the first failure. */
@@ -149,6 +196,21 @@ private:
 	std::atomic<float> minLimiterGain_{1.f};
 	std::atomic<uint32_t> chainLatencyFrames_{0};
 	std::atomic<double> ratio_{1.0};
+
+	// Decoded once by loadFile and only read after that, by whichever thread is
+	// playing it. Nothing touches it while the engine runs, which is what makes
+	// the bare reference in fileThread safe.
+	AudioBuffer file_;
+	std::wstring filePath_;
+	std::atomic<size_t> filePosition_{0};
+	std::atomic<bool> fileEnded_{false};
+	std::atomic<bool> loopFile_{true};
+
+	/** Where the render thread wants the ring held, in capture-rate frames.
+	    A device producer cannot be told to slow down and so never reads this;
+	    a file producer can, and aiming at the same number is what keeps the
+	    drift controller out of the file path entirely. */
+	std::atomic<double> ringTargetFrames_{0.0};
 
 	std::mutex errorMutex_;
 	std::wstring asyncError_;

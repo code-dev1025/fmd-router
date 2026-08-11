@@ -16,6 +16,7 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
 
 #include <algorithm>
 #include <cmath>
@@ -39,12 +40,18 @@ const wchar_t* const kAppName = L"Real Mono Sound";
 enum : int {
 	IDC_CAPTURE_COMBO = 1001,
 	IDC_RENDER_COMBO = 1002,
-	IDC_LOOPBACK = 1003,
+	IDC_SRC_DEVICE = 1003,
 	IDC_REFRESH = 1004,
 	IDC_START = 1005,
 	IDC_BANNER = 1006,
 	IDC_STATUS = 1007,
 	IDC_STATUS2 = 1008,
+
+	IDC_SRC_LOOPBACK = 1040,
+	IDC_SRC_FILE = 1041,
+	IDC_CHOOSE_FILE = 1042,
+	IDC_LOOP = 1043,
+	IDC_FILE_PATH = 1044,
 
 	IDC_PRESET = 1010,
 	IDC_ADVANCED = 1011,
@@ -147,6 +154,17 @@ const Option kHpfModes[] = {
 	{L"Linkwitz-Riley", HpfCrossoverMono},
 };
 
+/*  Where the audio comes from. Three mutually exclusive answers, so three
+    radio buttons rather than a checkbox that only ever covered two of them --
+    and one row, because the row underneath already changes meaning with the
+    choice (an endpoint list, or the file being played) and the banner already
+    explains whichever one is showing. */
+enum SourceMode {
+	SourceDevice = 0,
+	SourceLoopback,
+	SourceFile,
+};
+
 
 struct App {
 	HWND main = nullptr;
@@ -154,7 +172,12 @@ struct App {
 
 	HWND captureCombo = nullptr;
 	HWND renderCombo = nullptr;
-	HWND loopbackCheck = nullptr;
+	HWND srcDevice = nullptr;
+	HWND srcLoopback = nullptr;
+	HWND srcFile = nullptr;
+	HWND chooseFileButton = nullptr;
+	HWND loopCheck = nullptr;
+	HWND filePathLabel = nullptr;
 	HWND startButton = nullptr;
 	HWND advancedButton = nullptr;
 	HWND banner = nullptr;
@@ -265,6 +288,25 @@ std::wstring formatDb(float db) {
 	wchar_t buf[32];
 	swprintf_s(buf, L"%+.1f dB", db);
 	return buf;
+}
+
+/** Seconds as m:ss, which is how long a piece of music is. */
+std::wstring formatClock(double seconds) {
+	if (seconds < 0.0)
+		seconds = 0.0;
+	const int total = int(seconds);
+	wchar_t buf[32];
+	swprintf_s(buf, L"%d:%02d", total / 60, total % 60);
+	return buf;
+}
+
+/** Which of the three source radios is on. */
+SourceMode sourceMode() {
+	if (checked(g.srcFile))
+		return SourceFile;
+	if (checked(g.srcLoopback))
+		return SourceLoopback;
+	return SourceDevice;
 }
 
 
@@ -427,14 +469,47 @@ void fillCombo(HWND combo, const std::vector<DeviceInfo>& devices, bool preferVi
 		SendMessageW(combo, CB_SETCURSEL, select, 0);
 }
 
+/** The capture combo and the file path share a row and take turns: in file
+    mode the endpoint list has nothing to say, and the path has. */
+void refreshSourceControls() {
+	const bool file = (sourceMode() == SourceFile);
+	const bool running = g.engine.running();
+
+	ShowWindow(g.captureCombo, file ? SW_HIDE : SW_SHOW);
+	ShowWindow(g.filePathLabel, file ? SW_SHOW : SW_HIDE);
+	EnableWindow(g.chooseFileButton, file && !running);
+	EnableWindow(g.loopCheck, file);
+}
+
 void updateBanner() {
-	const bool loopback = checked(g.loopbackCheck);
+	const SourceMode mode = sourceMode();
+
+	if (mode == SourceFile) {
+		const Engine::FileInfo info = g.engine.fileInfo();
+		if (!info.loaded) {
+			SetWindowTextW(g.banner,
+			    L"Press \"Choose file\x2026\" and pick a WAV, MP3, Ogg or FLAC. It plays "
+			    L"through the chain to the playback device below, so the A/B needs no "
+			    L"virtual cable and nothing else running.");
+			return;
+		}
+		// No file name here: the row above already shows the whole path, and a
+		// banner whose length depends on the file name is a banner that clips
+		// its own instructions on a long one.
+		const std::wstring text =
+		    formatClock(info.seconds) + L", " + std::to_wstring(info.sampleRate)
+		    + L" Hz. It plays through the chain to the playback device below \x2014 toggle "
+		      L"\"Real Mono processing\" while it runs and the difference is the whole "
+		      L"point of the exercise.";
+		SetWindowTextW(g.banner, text.c_str());
+		return;
+	}
 
 	bool haveCable = false;
 	for (const DeviceInfo& d : g.captureDevices)
 		haveCable = haveCable || d.isVirtualCable;
 
-	if (loopback) {
+	if (mode == SourceLoopback) {
 		SetWindowTextW(g.banner,
 		    L"Loopback mode taps a playback device, so you hear the original audio as well as "
 		    L"the mono version. Use it to audition the chain; use a virtual cable for real "
@@ -455,7 +530,7 @@ void updateBanner() {
 
 void refreshDevices() {
 	std::wstring err;
-	const bool loopback = checked(g.loopbackCheck);
+	const bool loopback = (sourceMode() == SourceLoopback);
 
 	// Loopback taps a playback endpoint, so the source list becomes the render
 	// list. Same combo, different meaning -- the banner says which.
@@ -466,17 +541,81 @@ void refreshDevices() {
 
 	fillCombo(g.captureCombo, g.captureDevices, !loopback);
 	fillCombo(g.renderCombo, g.renderDevices, false);
+	refreshSourceControls();
 	updateBanner();
+}
+
+
+// ------------------------------------------------------------- file playback
+
+/** Picks a file and decodes it, or explains why it could not. The decode is
+    synchronous and can take a second on a long MP3, so the cursor says so --
+    the message loop is not running during it, which is also why the wait
+    cursor set here is not undone by the next WM_SETCURSOR. */
+void chooseFile() {
+	// Long paths exist and MAX_PATH does not fit them; the dialog is happy to
+	// write into whatever is provided.
+	std::vector<wchar_t> path(4096, L'\0');
+
+	OPENFILENAMEW ofn = {};
+	ofn.lStructSize = sizeof(ofn);
+	ofn.hwndOwner = g.main;
+	// Filters are double-null terminated pairs, which is why these look like
+	// they are missing their separators.
+	ofn.lpstrFilter =
+	    L"Audio files\0*.wav;*.mp3;*.ogg;*.oga;*.flac;*.m4a;*.aac;*.wma\0"
+	    L"WAV\0*.wav\0"
+	    L"MP3\0*.mp3\0"
+	    L"Ogg Vorbis\0*.ogg;*.oga\0"
+	    L"FLAC\0*.flac\0"
+	    L"All files\0*.*\0";
+	ofn.lpstrFile = path.data();
+	ofn.nMaxFile = DWORD(path.size());
+	ofn.lpstrTitle = L"Choose a file to play through Real Mono";
+	ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
+
+	if (!GetOpenFileNameW(&ofn))
+		return;  // cancelled, which is not an error
+
+	const HCURSOR previous = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+	std::wstring err;
+	const bool ok = g.engine.loadFile(path.data(), err);
+	SetCursor(previous);
+
+	if (!ok) {
+		SetWindowTextW(g.filePathLabel, L"");
+		updateBanner();
+		MessageBoxW(g.main, err.c_str(), L"Real Mono Sound \x2014 could not load that file",
+		            MB_ICONWARNING | MB_OK);
+		return;
+	}
+
+	const Engine::FileInfo info = g.engine.fileInfo();
+	SetWindowTextW(g.filePathLabel, info.path.c_str());
+	updateBanner();
+
+	// A file that loaded but has something worth saying about it -- one that
+	// was too long to hold, so far. It is playable either way, so this is told
+	// after the UI has already accepted it.
+	if (!err.empty())
+		MessageBoxW(g.main, err.c_str(), kAppName, MB_ICONINFORMATION | MB_OK);
 }
 
 
 // ------------------------------------------------------------ start / stop
 
 void updateStartButton() {
-	SetWindowTextW(g.startButton, g.engine.running() ? L"Stop" : L"Start");
-	EnableWindow(g.captureCombo, !g.engine.running());
-	EnableWindow(g.renderCombo, !g.engine.running());
-	EnableWindow(g.loopbackCheck, !g.engine.running());
+	const bool running = g.engine.running();
+	// "Play" rather than "Start" for a file: the button does the same thing,
+	// but what it does to a file has a name everybody already knows.
+	SetWindowTextW(g.startButton,
+	               running ? L"Stop" : (sourceMode() == SourceFile ? L"Play" : L"Start"));
+	EnableWindow(g.captureCombo, !running);
+	EnableWindow(g.renderCombo, !running);
+	EnableWindow(g.srcDevice, !running);
+	EnableWindow(g.srcLoopback, !running);
+	EnableWindow(g.srcFile, !running);
+	refreshSourceControls();
 }
 
 void toggleEngine() {
@@ -488,18 +627,36 @@ void toggleEngine() {
 		return;
 	}
 
-	const LRESULT capSel = SendMessageW(g.captureCombo, CB_GETCURSEL, 0, 0);
+	const SourceMode mode = sourceMode();
 	const LRESULT renSel = SendMessageW(g.renderCombo, CB_GETCURSEL, 0, 0);
-	if (capSel == CB_ERR || renSel == CB_ERR) {
-		MessageBoxW(g.main, L"Choose both a source and a playback device first.",
+	if (renSel == CB_ERR) {
+		MessageBoxW(g.main, L"Choose a playback device first.",
 		            kAppName, MB_ICONINFORMATION | MB_OK);
 		return;
 	}
 
 	EngineConfig cfg;
-	cfg.captureId = g.captureDevices[size_t(capSel)].id;
 	cfg.renderId = g.renderDevices[size_t(renSel)].id;
-	cfg.loopback = checked(g.loopbackCheck);
+	cfg.loopback = (mode == SourceLoopback);
+	cfg.fromFile = (mode == SourceFile);
+	cfg.loopFile = checked(g.loopCheck);
+
+	if (cfg.fromFile) {
+		if (!g.engine.fileInfo().loaded) {
+			MessageBoxW(g.main, L"Choose a file to play first.",
+			            kAppName, MB_ICONINFORMATION | MB_OK);
+			return;
+		}
+	}
+	else {
+		const LRESULT capSel = SendMessageW(g.captureCombo, CB_GETCURSEL, 0, 0);
+		if (capSel == CB_ERR) {
+			MessageBoxW(g.main, L"Choose a source device first.",
+			            kAppName, MB_ICONINFORMATION | MB_OK);
+			return;
+		}
+		cfg.captureId = g.captureDevices[size_t(capSel)].id;
+	}
 
 	// Loopback taps everything playing on a device, including whatever this app
 	// just wrote there. Pointing both ends at one device is a feedback loop
@@ -617,6 +774,16 @@ void onTimer() {
 		return;
 	}
 
+	// A file that has played out with looping off stops the engine, rather than
+	// leaving it running on silence with the Stop button still lit.
+	if (s.fileEnded && g.engine.running()) {
+		g.engine.stop();
+		updateStartButton();
+		SetWindowTextW(g.status, L"The file finished.");
+		SetWindowTextW(g.status2, L"");
+		return;
+	}
+
 	if (g.advancedShown) {
 		updateLatencyLabel(s.renderRate);
 
@@ -637,7 +804,19 @@ void onTimer() {
 	                L"device period %.1f / %.1f ms",
 	           s.captureRate, s.captureChannels, s.renderRate, s.renderChannels,
 	           s.capturePeriodMs, s.renderPeriodMs);
-	SetWindowTextW(g.status, buf);
+
+	if (sourceMode() == SourceFile) {
+		// The position leads what is audible by the round trip, which is tens
+		// of milliseconds -- invisible at this resolution and not worth
+		// pretending to correct.
+		const Engine::FileInfo info = g.engine.fileInfo();
+		const std::wstring line = formatClock(s.filePositionSeconds) + L" / "
+		                        + formatClock(info.seconds) + L"        " + buf;
+		SetWindowTextW(g.status, line.c_str());
+	}
+	else {
+		SetWindowTextW(g.status, buf);
+	}
 
 	swprintf_s(buf, L"buffer %.1f ms    chain %.1f ms    round trip ~%.1f ms    "
 	                L"resample %.4f\x00D7    drops %llu",
@@ -683,12 +862,34 @@ void buildRouting() {
 	child(L"BUTTON", L" Routing ", BS_GROUPBOX, 12, 8, 636, 176, -1);
 
 	child(L"STATIC", L"Take audio from:", SS_LEFT, 26, 36, 120, 20, -1);
-	g.captureCombo = child(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
-	                       152, 32, 480, 320, IDC_CAPTURE_COMBO);
 
-	g.loopbackCheck = child(L"BUTTON", L"Loopback \x2014 tap a playback device (you also hear "
-	                                   L"the original)",
-	                        BS_AUTOCHECKBOX | WS_TABSTOP, 152, 62, 480, 22, IDC_LOOPBACK);
+	// WS_GROUP starts the radio set; the Choose button carries WS_GROUP to end
+	// it, or the render combo further down would be swept into the same group
+	// and the arrow keys would walk off the end of the source row into it.
+	g.srcDevice = child(L"BUTTON", L"Device",
+	                    BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 152, 36, 72, 22,
+	                    IDC_SRC_DEVICE);
+	g.srcLoopback = child(L"BUTTON", L"Loopback",
+	                      BS_AUTORADIOBUTTON, 232, 36, 88, 22, IDC_SRC_LOOPBACK);
+	g.srcFile = child(L"BUTTON", L"File",
+	                  BS_AUTORADIOBUTTON, 328, 36, 60, 22, IDC_SRC_FILE);
+	g.chooseFileButton = child(L"BUTTON", L"Choose file\x2026",
+	                           BS_PUSHBUTTON | WS_GROUP | WS_TABSTOP, 396, 32, 116, 26,
+	                           IDC_CHOOSE_FILE);
+	g.loopCheck = child(L"BUTTON", L"Loop", BS_AUTOCHECKBOX | WS_TABSTOP,
+	                    524, 36, 64, 22, IDC_LOOP);
+
+	// The endpoint list and the loaded file share this row; refreshSourceControls
+	// shows whichever the source radios have made relevant. SS_PATHELLIPSIS
+	// eats the middle of a long path rather than the file name at the end of it.
+	g.captureCombo = child(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
+	                       152, 62, 480, 320, IDC_CAPTURE_COMBO);
+	g.filePathLabel = child(L"STATIC", L"", SS_LEFT | SS_PATHELLIPSIS,
+	                        152, 66, 480, 20, IDC_FILE_PATH);
+
+	// Device is the shipping routing; looping is what a test file is for.
+	setChecked(g.srcDevice, true);
+	setChecked(g.loopCheck, true);
 
 	child(L"STATIC", L"Play processed to:", SS_LEFT, 26, 94, 120, 20, -1);
 	g.renderCombo = child(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
@@ -904,8 +1105,23 @@ LRESULT CALLBACK mainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 				toggleEngine();
 				return 0;
 			}
-			if (id == IDC_LOOPBACK && code == BN_CLICKED) {
+			// Loopback lists render endpoints where Device lists capture ones,
+			// so changing the source relists; File hides the list entirely.
+			// refreshDevices does all three plus the banner.
+			if ((id == IDC_SRC_DEVICE || id == IDC_SRC_LOOPBACK || id == IDC_SRC_FILE)
+			    && code == BN_CLICKED) {
 				refreshDevices();
+				updateStartButton();
+				return 0;
+			}
+			if (id == IDC_CHOOSE_FILE && code == BN_CLICKED) {
+				chooseFile();
+				return 0;
+			}
+			// Looping is live, so it goes straight to the file thread rather
+			// than through the chain settings.
+			if (id == IDC_LOOP && code == BN_CLICKED) {
+				g.engine.setLoopFile(checked(g.loopCheck));
 				return 0;
 			}
 			if (id == IDC_ADVANCED && code == BN_CLICKED) {
