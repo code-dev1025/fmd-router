@@ -142,7 +142,16 @@ Pick **File**, press *Choose file…*, press *Play*. The file goes through the
 same ring, resampler and `RealMonoChain` a live capture does — it is a source,
 not a separate code path — so what you hear is what the app would have played
 had the audio arrived down a cable. It plays to whatever *Play processed to* is
-set to, and the status line shows the position.
+set to.
+
+The transport is a seek bar, a Pause button and a clock, on the line the banner
+lends it in file mode:
+
+| Control | What it does |
+| --- | --- |
+| **Seek bar** | Scrub anywhere in the file, playing or stopped. Stopped, it chooses where *Play* will begin. The jump is heard one ring buffer later — about 30 ms — because what is already queued belongs to the render thread and is not the producer's to throw away. |
+| **Pause** | Holds the position and feeds silence, so the chain stays alive and the endpoint stays fed. Distinct from *Stop*, which tears the audio threads down and rewinds to the start. |
+| **Loop** | On by default, and live. |
 
 | Format | How |
 | --- | --- |
@@ -150,9 +159,9 @@ set to, and the status line shows the position.
 | **MP3, FLAC, M4A/AAC, WMA** | Windows' own codecs, via Media Foundation. |
 | **Ogg Vorbis** | Only if *Web Media Extensions* is installed — see below. |
 
-**Loop** is on by default and is live: leave it looping and toggle *Real Mono
-processing* while it plays, which is the A/B the whole app exists for. Turn it
-off mid-pass and the file is allowed to end, and the app stops itself.
+Leave it looping and toggle *Real Mono processing* while it plays: that is the
+A/B the whole app exists for. Turn looping off mid-pass and the file is allowed
+to end, at which point the app stops itself and rewinds.
 
 Two things worth knowing. The file is decoded into memory in one go, so there
 is a **ten-minute ceiling** — longer files load their first ten minutes and say
@@ -424,6 +433,11 @@ app's **File** source, which decodes it with Windows' own codecs.
   cleanly.
 - **The decoders present on this machine**, enumerated through `MFTEnumEx`:
   MP3, AAC, WMA and FLAC all registered. Ogg Vorbis is **not** — see below.
+- **The transport, in the app and headlessly.** A 3:54 MP3 was chosen through
+  the file dialog, played with live metering, paused (position frozen, input
+  peak to zero, no underruns), resumed, scrubbed to 25% and 75% — landing on
+  0:58 and 2:55 of 3:54 — and stopped, which rewound to 0:00 and re-enabled the
+  source controls. The screenshot above is that run.
 
 **Not verified:**
 
@@ -456,8 +470,8 @@ app's **File** source, which decodes it with Windows' own codecs.
   zones take, but a centre channel would want the same feed.
 - **Settings are not saved.** Device choice, preset, the chosen file and every
   control return to their defaults on restart.
-- **The File source has no seek or pause.** Play, loop and stop, which is what
-  an A/B needs; it is a test player, not a media player.
+- **The File source is a test player, not a media player.** Play, pause, seek,
+  loop and stop; no playlist, no waveform, no output recording.
 - **Files are held in memory, capped at ten minutes.** A longer one loads its
   first ten minutes and says so. `realmono-wav` has no such limit.
 - **Stage 3's HQ mode rolls off below ~120 Hz** — a windowed FIR Hilbert cannot

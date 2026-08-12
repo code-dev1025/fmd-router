@@ -52,6 +52,9 @@ enum : int {
 	IDC_CHOOSE_FILE = 1042,
 	IDC_LOOP = 1043,
 	IDC_FILE_PATH = 1044,
+	IDC_SEEK = 1045,
+	IDC_PAUSE = 1046,
+	IDC_TIME = 1047,
 
 	IDC_PRESET = 1010,
 	IDC_ADVANCED = 1011,
@@ -178,6 +181,9 @@ struct App {
 	HWND chooseFileButton = nullptr;
 	HWND loopCheck = nullptr;
 	HWND filePathLabel = nullptr;
+	HWND seekSlider = nullptr;
+	HWND pauseButton = nullptr;
+	HWND timeLabel = nullptr;
 	HWND startButton = nullptr;
 	HWND advancedButton = nullptr;
 	HWND banner = nullptr;
@@ -209,6 +215,11 @@ struct App {
 	std::vector<HWND> advanced;
 	bool advancedShown = false;
 
+	// True between the first TB_THUMBTRACK and the TB_ENDTRACK that closes it.
+	// While it is set the timer leaves the seek bar alone, or the thumb would
+	// be dragged out from under the mouse thirty times a second.
+	bool scrubbing = false;
+
 	std::vector<DeviceInfo> captureDevices;
 	std::vector<DeviceInfo> renderDevices;
 
@@ -225,6 +236,22 @@ App g;
 
 const int kBaseHeight = 604;
 const int kAdvancedHeight = 924;
+
+// The banner is three lines of routing instructions normally, and two when the
+// file transport needs the third. Both heights are declared here because
+// refreshSourceControls resizes between them and the numbers have to agree.
+/*  The routing box has sixty pixels below the playback combo, and the file
+    transport wants twenty-four of them. That leaves one line of banner, not
+    two: at this font two lines need forty and would have the seek bar sitting
+    on their descenders. It is the right line to give up — the three-line
+    banner exists for the virtual-cable instructions, and a file source has no
+    cable to explain. */
+const int kBannerHeight = 58;
+const int kBannerHeightWithTransport = 22;
+
+// Resolution of the seek bar. A thousand steps is a quarter of a second on a
+// four-minute file, which is finer than anyone scrubs by hand.
+const int kSeekTicks = 1000;
 
 
 // ---------------------------------------------------------------- utilities
@@ -469,16 +496,55 @@ void fillCombo(HWND combo, const std::vector<DeviceInfo>& devices, bool preferVi
 		SendMessageW(combo, CB_SETCURSEL, select, 0);
 }
 
-/** The capture combo and the file path share a row and take turns: in file
-    mode the endpoint list has nothing to say, and the path has. */
+/** Two rows change meaning with the source. The capture combo and the file
+    path take turns on the first -- in file mode the endpoint list has nothing
+    to say and the path has -- and the banner gives up its third line to the
+    transport on the second. Nothing moves that a device user would notice, and
+    the window is one height throughout. */
 void refreshSourceControls() {
 	const bool file = (sourceMode() == SourceFile);
 	const bool running = g.engine.running();
+	const bool haveFile = g.engine.fileInfo().loaded;
 
 	ShowWindow(g.captureCombo, file ? SW_HIDE : SW_SHOW);
 	ShowWindow(g.filePathLabel, file ? SW_SHOW : SW_HIDE);
 	EnableWindow(g.chooseFileButton, file && !running);
 	EnableWindow(g.loopCheck, file);
+
+	const int bannerHeight = file ? kBannerHeightWithTransport : kBannerHeight;
+	SetWindowPos(g.banner, nullptr, 0, 0, 606, bannerHeight,
+	             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+	for (HWND control : {g.seekSlider, g.pauseButton, g.timeLabel})
+		ShowWindow(control, file ? SW_SHOW : SW_HIDE);
+
+	// Scrubbing a file that is not playing is how you choose where Play starts,
+	// so the bar is live while stopped. Pause is not: there is nothing to hold.
+	EnableWindow(g.seekSlider, file && haveFile);
+	EnableWindow(g.pauseButton, file && running);
+	if (!running)
+		SetWindowTextW(g.pauseButton, L"Pause");
+}
+
+/** The clock, from whatever the seek bar is currently showing. */
+void refreshTimeLabel(double positionSeconds) {
+	const Engine::FileInfo info = g.engine.fileInfo();
+	const std::wstring text = formatClock(positionSeconds) + L" / " + formatClock(info.seconds);
+	SetWindowTextW(g.timeLabel, text.c_str());
+}
+
+/** Where the seek bar is pointing, in seconds. */
+double seekSliderSeconds() {
+	const Engine::FileInfo info = g.engine.fileInfo();
+	const double norm = double(SendMessageW(g.seekSlider, TBM_GETPOS, 0, 0)) / double(kSeekTicks);
+	return norm * info.seconds;
+}
+
+void setSeekSlider(double seconds) {
+	const Engine::FileInfo info = g.engine.fileInfo();
+	const double norm = (info.seconds > 0.0) ? (seconds / info.seconds) : 0.0;
+	const int pos = int(std::max(0.0, std::min(1.0, norm)) * kSeekTicks + 0.5);
+	SendMessageW(g.seekSlider, TBM_SETPOS, TRUE, pos);
 }
 
 void updateBanner() {
@@ -486,11 +552,12 @@ void updateBanner() {
 
 	if (mode == SourceFile) {
 		const Engine::FileInfo info = g.engine.fileInfo();
+		// One line, and it has to fit on one: the transport has the rest of the
+		// space and this static clips rather than wrapping.
 		if (!info.loaded) {
 			SetWindowTextW(g.banner,
-			    L"Press \"Choose file\x2026\" and pick a WAV, MP3, Ogg or FLAC. It plays "
-			    L"through the chain to the playback device below, so the A/B needs no "
-			    L"virtual cable and nothing else running.");
+			    L"Choose a WAV, MP3, FLAC or M4A \x2014 it plays through the chain, "
+			    L"no cable needed.");
 			return;
 		}
 		// No file name here: the row above already shows the whole path, and a
@@ -498,9 +565,7 @@ void updateBanner() {
 		// its own instructions on a long one.
 		const std::wstring text =
 		    formatClock(info.seconds) + L", " + std::to_wstring(info.sampleRate)
-		    + L" Hz. It plays through the chain to the playback device below \x2014 toggle "
-		      L"\"Real Mono processing\" while it runs and the difference is the whole "
-		      L"point of the exercise.";
+		    + L" Hz \x2014 leave it looping and toggle \"Real Mono processing\" to A/B.";
 		SetWindowTextW(g.banner, text.c_str());
 		return;
 	}
@@ -592,6 +657,9 @@ void chooseFile() {
 
 	const Engine::FileInfo info = g.engine.fileInfo();
 	SetWindowTextW(g.filePathLabel, info.path.c_str());
+	setSeekSlider(0.0);
+	refreshTimeLabel(0.0);
+	refreshSourceControls();
 	updateBanner();
 
 	// A file that loaded but has something worth saying about it -- one that
@@ -621,6 +689,13 @@ void updateStartButton() {
 void toggleEngine() {
 	if (g.engine.running()) {
 		g.engine.stop();
+		// Stop rewinds; Pause is the control that holds a position. Without
+		// this the pause state would also survive into the next Play and the
+		// file would sit there silently looking broken.
+		g.engine.setPaused(false);
+		g.engine.seekTo(0.0);
+		setSeekSlider(0.0);
+		refreshTimeLabel(0.0);
 		updateStartButton();
 		SetWindowTextW(g.status, L"Stopped.");
 		SetWindowTextW(g.status2, L"");
@@ -774,10 +849,23 @@ void onTimer() {
 		return;
 	}
 
+	// The seek bar follows the file, except while it is being dragged -- then
+	// the user owns it and the clock reads from the thumb instead.
+	if (sourceMode() == SourceFile && !g.scrubbing) {
+		setSeekSlider(s.filePositionSeconds);
+		refreshTimeLabel(s.filePositionSeconds);
+	}
+
 	// A file that has played out with looping off stops the engine, rather than
 	// leaving it running on silence with the Stop button still lit.
 	if (s.fileEnded && g.engine.running()) {
 		g.engine.stop();
+		// Rewound, or the next Play would start on the last frame and end again
+		// before anything came out of the speakers.
+		g.engine.setPaused(false);
+		g.engine.seekTo(0.0);
+		setSeekSlider(0.0);
+		refreshTimeLabel(0.0);
 		updateStartButton();
 		SetWindowTextW(g.status, L"The file finished.");
 		SetWindowTextW(g.status2, L"");
@@ -805,18 +893,9 @@ void onTimer() {
 	           s.captureRate, s.captureChannels, s.renderRate, s.renderChannels,
 	           s.capturePeriodMs, s.renderPeriodMs);
 
-	if (sourceMode() == SourceFile) {
-		// The position leads what is audible by the round trip, which is tens
-		// of milliseconds -- invisible at this resolution and not worth
-		// pretending to correct.
-		const Engine::FileInfo info = g.engine.fileInfo();
-		const std::wstring line = formatClock(s.filePositionSeconds) + L" / "
-		                        + formatClock(info.seconds) + L"        " + buf;
-		SetWindowTextW(g.status, line.c_str());
-	}
-	else {
-		SetWindowTextW(g.status, buf);
-	}
+	// The position has its own readout next to the seek bar, so the status line
+	// stays what it is for either source: formats and device periods.
+	SetWindowTextW(g.status, buf);
 
 	swprintf_s(buf, L"buffer %.1f ms    chain %.1f ms    round trip ~%.1f ms    "
 	                L"resample %.4f\x00D7    drops %llu",
@@ -896,8 +975,19 @@ void buildRouting() {
 	                      152, 90, 480, 320, IDC_RENDER_COMBO);
 
 	// Three lines: the banner carries the routing instructions, and truncating
-	// those is exactly the wrong thing to save 18 pixels on.
-	g.banner = child(L"STATIC", L"", SS_LEFT, 26, 118, 606, 58, IDC_BANNER);
+	// those is exactly the wrong thing to save 18 pixels on. In file mode it
+	// gives up its third line to the transport below -- see kBannerHeight.
+	g.banner = child(L"STATIC", L"", SS_LEFT, 26, 118, 606, kBannerHeight, IDC_BANNER);
+
+	// The transport lives on the line the banner lends it, so the window is
+	// the same height with a file loaded as without one.
+	g.seekSlider = child(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP,
+	                     24, 148, 404, 26, IDC_SEEK);
+	SendMessageW(g.seekSlider, TBM_SETRANGE, TRUE, MAKELPARAM(0, kSeekTicks));
+	SendMessageW(g.seekSlider, TBM_SETPAGESIZE, 0, kSeekTicks / 20);
+	g.pauseButton = child(L"BUTTON", L"Pause", BS_PUSHBUTTON | WS_TABSTOP,
+	                      436, 148, 78, 26, IDC_PAUSE);
+	g.timeLabel = child(L"STATIC", L"0:00 / 0:00", SS_LEFT, 524, 152, 108, 20, IDC_TIME);
 }
 
 void buildMainPanel() {
@@ -1124,6 +1214,19 @@ LRESULT CALLBACK mainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 				g.engine.setLoopFile(checked(g.loopCheck));
 				return 0;
 			}
+			if (id == IDC_PAUSE && code == BN_CLICKED) {
+				// The button is disabled while stopped, but "the control was
+				// greyed" is not a state check: a BM_CLICK sent to it still
+				// arrives here, and acting on one would leave "Paused." sitting
+				// under a Play button with nothing to resume.
+				if (!g.engine.running())
+					return 0;
+				const bool paused = !g.engine.paused();
+				g.engine.setPaused(paused);
+				SetWindowTextW(g.pauseButton, paused ? L"Resume" : L"Pause");
+				SetWindowTextW(g.status, paused ? L"Paused." : L"Running.");
+				return 0;
+			}
 			if (id == IDC_ADVANCED && code == BN_CLICKED) {
 				showAdvanced(!g.advancedShown);
 				return 0;
@@ -1142,9 +1245,27 @@ LRESULT CALLBACK mainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 		}
 
 		case WM_HSCROLL:
-			// Every trackbar reports here; the control handle in lParam says
-			// which one, and it is cheaper to just republish all of them than
-			// to work out the index and republish one.
+			// The seek bar is a trackbar but not a chain parameter, so it is
+			// taken out of the line before the rest are republished.
+			if (lp && HWND(lp) == g.seekSlider) {
+				const int notify = LOWORD(wp);
+				if (notify == TB_THUMBTRACK) {
+					// Mid-drag: show where the thumb is, but do not jump the
+					// audio there on every pixel of a scrub.
+					g.scrubbing = true;
+					refreshTimeLabel(seekSliderSeconds());
+				}
+				else {
+					g.scrubbing = false;
+					const double seconds = seekSliderSeconds();
+					g.engine.seekTo(seconds);
+					refreshTimeLabel(seconds);
+				}
+				return 0;
+			}
+			// Every other trackbar reports here; the control handle in lParam
+			// says which one, and it is cheaper to just republish all of them
+			// than to work out the index and republish one.
 			if (lp) {
 				pushParams();
 				refreshValueLabels();

@@ -134,9 +134,13 @@ bool Engine::start(const EngineConfig& cfg, std::wstring& err) {
 	minLimiterGain_.store(1.f, std::memory_order_relaxed);
 	chainLatencyFrames_.store(0, std::memory_order_relaxed);
 	ringTargetFrames_.store(0.0, std::memory_order_relaxed);
-	filePosition_.store(0, std::memory_order_relaxed);
 	fileEnded_.store(false, std::memory_order_relaxed);
 	loopFile_.store(cfg.loopFile, std::memory_order_relaxed);
+	paused_.store(false, std::memory_order_relaxed);
+	// filePosition_ is deliberately left alone: a scrub while stopped is how
+	// you choose where Play begins. Only the pending seek is dropped, since
+	// seekTo has already folded it into filePosition_ for us.
+	seekRequest_.store(-1, std::memory_order_relaxed);
 	{
 		std::lock_guard<std::mutex> lock(errorMutex_);
 		asyncError_.clear();
@@ -276,6 +280,29 @@ bool Engine::loadFile(const std::wstring& path, std::wstring& err) {
 }
 
 
+void Engine::seekTo(double seconds) {
+	const size_t frames = file_.frames();
+	if (frames == 0 || file_.sampleRate == 0)
+		return;
+
+	double frame = seconds * double(file_.sampleRate);
+	if (frame < 0.0)
+		frame = 0.0;
+	if (frame > double(frames - 1))
+		frame = double(frames - 1);
+	const size_t target = size_t(frame);
+
+	// Exactly one writer for filePosition_ at any moment: the file thread owns
+	// it while running and publishes where it has actually got to, so writing
+	// it from here as well would let a store from mid-fill land after this one
+	// and jerk the readout backwards for a frame.
+	if (running())
+		seekRequest_.store(int64_t(target), std::memory_order_release);
+	else
+		filePosition_.store(target, std::memory_order_relaxed);
+}
+
+
 Engine::FileInfo Engine::fileInfo() const {
 	FileInfo info;
 	info.path = filePath_;
@@ -318,13 +345,30 @@ void Engine::fileThread(EngineConfig cfg, Ready* readyPtr) {
 	// 2048 frames is a comfortable bite at any rate and keeps the scratch in
 	// cache; the loop below takes as many bites as the ring has room for.
 	std::vector<float> scratch(2048 * 2, 0.f);
-	size_t pos = 0;
+	// Wherever the position was left: zero after a load, or wherever the user
+	// scrubbed to before pressing Play.
+	size_t pos = std::min(filePosition_.load(std::memory_order_relaxed), frames - 1);
 	bool ended = false;          // the file ran out and looping is off
 	size_t silenceAfterEnd = 0;  // frames of tail pushed since then
 
 	ProAudioPriority priority;
 
 	while (!quit_.load(std::memory_order_acquire)) {
+		// A scrub lands here. Taking it at the top of a fill means the frames
+		// already queued play out first and the jump is heard one ring later,
+		// which is the price of not reaching into the consumer's end.
+		const int64_t seek = seekRequest_.exchange(-1, std::memory_order_acquire);
+		if (seek >= 0) {
+			pos = std::min(size_t(seek), frames - 1);
+			// Scrubbing back into the file un-ends it, or a seek after the last
+			// pass would land on a player that has already given up.
+			ended = false;
+			silenceAfterEnd = 0;
+			fileEnded_.store(false, std::memory_order_relaxed);
+		}
+
+		const bool paused = paused_.load(std::memory_order_relaxed);
+
 		// Aim at exactly the fill the render thread is holding for, so its
 		// drift controller -- which is frozen in file mode anyway, there being
 		// no second clock to drift against -- sees the number it expects.
@@ -341,7 +385,7 @@ void Engine::fileThread(EngineConfig cfg, Ready* readyPtr) {
 			float peakL = 0.f, peakR = 0.f;
 			size_t n = 0;
 
-			for (; n < chunk; n++) {
+			for (; n < chunk && !paused; n++) {
 				if (pos >= frames) {
 					if (!loopFile_.load(std::memory_order_relaxed)) {
 						ended = true;
@@ -357,8 +401,9 @@ void Engine::fileThread(EngineConfig cfg, Ready* readyPtr) {
 				peakR = std::max(peakR, std::abs(r));
 				pos++;
 			}
-			// A file that has run out still has to hand over frames, or the
-			// render side would underrun and stutter instead of going quiet.
+			// A file that is paused or has run out still has to hand over
+			// frames, or the render side would underrun and stutter where it
+			// should simply go quiet.
 			for (size_t i = n; i < chunk; i++) {
 				scratch[i * 2] = 0.f;
 				scratch[i * 2 + 1] = 0.f;

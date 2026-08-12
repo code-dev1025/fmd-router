@@ -127,6 +127,26 @@ public:
 		loopFile_.store(loop, std::memory_order_relaxed);
 	}
 
+	/** Jump to a position. Works stopped as well as running -- stopped, it sets
+	    where the next Play will begin from.
+
+	    What is already in the ring is not thrown away, because discarding it is
+	    the consumer's move and the file thread is the producer. So the new
+	    position is heard one buffer late: about 30 ms, which nobody scrubbing a
+	    waveform is going to notice, and the alternative is a race for it. */
+	void seekTo(double seconds);
+
+	/** Holds the file where it is and feeds silence, so the chain stays alive
+	    and the endpoint stays fed. Distinct from stop(), which tears the audio
+	    threads down and puts the position back to the start. */
+	void setPaused(bool paused) {
+		paused_.store(paused, std::memory_order_relaxed);
+	}
+
+	bool paused() const {
+		return paused_.load(std::memory_order_relaxed);
+	}
+
 	bool running() const {
 		return running_.load(std::memory_order_acquire);
 	}
@@ -205,6 +225,10 @@ private:
 	std::atomic<size_t> filePosition_{0};
 	std::atomic<bool> fileEnded_{false};
 	std::atomic<bool> loopFile_{true};
+	std::atomic<bool> paused_{false};
+	/** A frame the file thread should jump to, or -1 for "carry on". Signed
+	    because -1 has to mean something no frame index can. */
+	std::atomic<int64_t> seekRequest_{-1};
 
 	/** Where the render thread wants the ring held, in capture-rate frames.
 	    A device producer cannot be told to slow down and so never reads this;
