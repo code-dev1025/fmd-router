@@ -60,6 +60,7 @@ enum : int {
 	IDC_ADVANCED = 1011,
 	IDC_ENABLE = 1012,
 	IDC_HQ = 1013,
+	IDC_MODE = 1014,
 
 	IDC_S1_ENABLE = 1020,
 	IDC_S1_SLOPE = 1021,
@@ -131,11 +132,11 @@ static_assert(std::size(kQualities) == NumQualities,
               "every Stage 3 quality needs a row in the drop-down");
 
 const Option kCommits[] = {
-	{L"Mid + rotated Side  (product)", CommitMidPlusRotatedSide},
-	{L"Sum 0.5(L+R)  (reference)",     CommitSum},
-	{L"Mid only  (Side discarded)",    CommitMidOnly},
-	{L"Side energy fold  (lab)",       CommitSideEnergyFold},
-	{L"Polarity matrix  (lab)",        CommitPolarityMatrix},
+	{L"Mid + rotated Side  (Real Mono)", CommitMidPlusRotatedSide},
+	{L"Sum 0.5(L+R)  (Mono reference)",  CommitSum},
+	{L"Mid only  (classic Mono)",        CommitMidOnly},
+	{L"Side energy fold  (lab)",         CommitSideEnergyFold},
+	{L"Polarity matrix  (lab)",          CommitPolarityMatrix},
 };
 static_assert(std::size(kCommits) == NumCommitModes,
               "every Stage 4 commit mode needs a row in the drop-down");
@@ -193,6 +194,7 @@ struct App {
 	HWND presetCombo = nullptr;
 	HWND enableCheck = nullptr;
 	HWND hqCheck = nullptr;
+	HWND modeLabel = nullptr;
 
 	HWND s1Enable = nullptr;
 	HWND s1Slope = nullptr;
@@ -433,9 +435,37 @@ void updateLatencyLabel(uint32_t renderRate) {
 	SetWindowTextW(g.latency, buf);
 }
 
+/*  What the output currently is, in the three words the client's interface
+    uses for it. It is a readout of the controls that already decide it -- the
+    global enable and the Stage 4 commit mode -- rather than a second place
+    that defines behaviour, so it cannot come to disagree with what the audio
+    thread is actually doing. */
+const wchar_t* outputModeName(const RealMonoSettings& s) {
+	if (!s.enabled)
+		return L"Stereo";           // the global bypass is untouched stereo
+	if (!s.commitEnabled)
+		return L"Stereo";           // Stage 4 off leaves M +/- rot(S): still two channels
+	switch (s.commitMode) {
+		case CommitSum:
+		case CommitMidOnly:
+			return L"Mono";         // the classic downmix, with the Side thrown away
+		case CommitMidPlusRotatedSide:
+			return L"Real Mono";
+		default:
+			return L"Mono  (lab)";  // Side energy fold, polarity matrix
+	}
+}
+
+void refreshModeLabel(const RealMonoSettings& s) {
+	const std::wstring text = std::wstring(L"Output:  ") + outputModeName(s);
+	SetWindowTextW(g.modeLabel, text.c_str());
+}
+
 void pushParams() {
-	g.engine.params.store(uiSettings());
+	const RealMonoSettings s = uiSettings();
+	g.engine.params.store(s);
 	refreshEnableStates();
+	refreshModeLabel(s);
 }
 
 void applySettingsToUi(const RealMonoSettings& s) {
@@ -1003,13 +1033,20 @@ void buildMainPanel() {
 	g.advancedButton = child(L"BUTTON", L"Advanced \x25BC", BS_PUSHBUTTON | WS_TABSTOP,
 	                         470, 217, 160, 28, IDC_ADVANCED);
 
-	g.enableCheck = child(L"BUTTON", L"Real Mono processing   (off = stereo pass-through)",
+	g.enableCheck = child(L"BUTTON", L"Real Mono processing   (off = Stereo pass-through)",
 	                      BS_AUTOCHECKBOX | WS_TABSTOP, 26, 256, 440, 22, IDC_ENABLE);
+	// Which of the three the output currently is. Right-aligned to the Advanced
+	// button directly above it so the box has one right edge and not two, and on
+	// the enable checkbox's row because the enable is what mostly decides it.
+	g.modeLabel = child(L"STATIC", L"Output:  Real Mono", SS_RIGHT,
+	                    470, 258, 160, 20, IDC_MODE);
+
 	// Sized to the label: a checkbox is clickable across its whole width, and a
 	// 500 px one behind four characters of text toggles when you click nowhere
-	// near it.
-	g.hqCheck = child(L"BUTTON", L"\x2212""3 dB",
-	                  BS_AUTOCHECKBOX | WS_TABSTOP, 26, 284, 90, 22, IDC_HQ);
+	// near it. The feature's name comes first and the trim it applies second --
+	// "-3 dB" alone named the mechanism and left the feature unlabelled.
+	g.hqCheck = child(L"BUTTON", L"Highest quality mode   (\x2212""3 dB input trim)",
+	                  BS_AUTOCHECKBOX | WS_TABSTOP, 26, 284, 320, 22, IDC_HQ);
 
 	child(L"STATIC", L"Ceiling", SS_LEFT, 26, 316, 60, 20, -1);
 	makeSlider(SL_CEILING, 90, 312, 300, false);
