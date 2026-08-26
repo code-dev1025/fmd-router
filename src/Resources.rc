@@ -1,0 +1,14 @@
+#include "Resources.h"
+
+/*  Paths are relative to this file. The client supplied the three background
+    plates and the three type faces; they go in verbatim, uncompressed, as
+    RCDATA -- GDI+ decodes the JPEGs and takes the fonts as memory faces, so
+    neither needs a format the resource compiler understands. */
+
+IDR_BACKGROUND_IDLE     RCDATA "../resources/images/background-0.jpg"
+IDR_BACKGROUND_STEREO   RCDATA "../resources/images/background-1-stereo.jpg"
+IDR_BACKGROUND_MONO     RCDATA "../resources/images/background-2-mono.jpg"
+
+IDR_FONT_BANNER         RCDATA "../resources/fonts/consola.ttf"
+IDR_FONT_SCRIPT         RCDATA "../resources/fonts/GreatVibes-Regular.ttf"
+IDR_FONT_BANNER_ALT     RCDATA "../resources/fonts/RobotoMono-Regular.ttf"

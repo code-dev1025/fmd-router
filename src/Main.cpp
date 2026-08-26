@@ -1,18 +1,29 @@
 /*  Real Mono Sound -- Win32 front end.
 
-    The default screen is deliberately small: pick the two devices, press
-    Start, and the only three things that change the sound are a preset, the
-    global enable and highest quality mode. That is the control density of the
-    demo the client asked the interface to match.
+    Two windows, and only one of them is the product.
 
-    Everything the brief calls a lab or developer control -- the per-stage
-    bypasses, the Stage 1 high-pass, the Hilbert quality, the Mid/Side gains
-    and the meters -- lives behind the Advanced button, where it can be
-    reached without being in the way. No stage is code-only: every one of the
-    five has a visible bypass. */
+    The face (Face.cpp) is the screen the client drew: their artwork, their
+    wording, five things to press. It owns no state -- everything it shows it
+    reads back out of this file, and everything it changes it changes by moving
+    the controls below.
+
+    The panel is this file: the routing, the file player, the meters, and the
+    per-stage bypasses the brief asks to be reachable. It is where every
+    setting actually lives, which is why the face is a view of it rather than a
+    second copy. Two windows each keeping their own idea of whether the limiter
+    is on is two windows that will one day disagree, and the one the client is
+    looking at will be the wrong one.
+
+    The panel is also where the devices are chosen and Start is pressed, so it
+    is shown at launch beside the face rather than hidden behind it: nothing
+    can play until someone has been in here. Closing it puts it away; Ctrl+A on
+    the face, or the face's system menu, brings it back. No stage is code-only:
+    every one of the five still has a visible bypass. */
 
 #include "Devices.h"
 #include "Engine.h"
+#include "Face.h"
+#include "Skin.h"  // for GDI+, which draws the face
 
 #include <windows.h>
 #include <commctrl.h>
@@ -171,7 +182,7 @@ enum SourceMode {
 
 
 struct App {
-	HWND main = nullptr;
+	HWND panel = nullptr;
 	HFONT font = nullptr;
 
 	HWND captureCombo = nullptr;
@@ -466,6 +477,10 @@ void pushParams() {
 	g.engine.params.store(s);
 	refreshEnableStates();
 	refreshModeLabel(s);
+	// The face reads these same controls, so anything that republishes them
+	// republishes to it too -- which is what keeps the two windows from ever
+	// showing different answers.
+	face::refresh();
 }
 
 void applySettingsToUi(const RealMonoSettings& s) {
@@ -495,6 +510,84 @@ void applySettingsToUi(const RealMonoSettings& s) {
 
 	refreshValueLabels();
 	pushParams();
+}
+
+
+// -------------------------------------------------------------- the face
+
+/*  What the client's five controls are worth, in the units of the panel's own
+    sliders -- because that is literally what they set. SOLO lifts the Side
+    inside the mix so the recovered content is what you notice; LOUDNESS drives
+    the output into the limiter, which is already holding -0.3 dBFS, so the
+    peaks stay put and everything under them comes up.
+
+    Both are the top of the ranges the brief gives those controls, so neither
+    can drive the panel somewhere the panel would not go on its own. */
+const float kSoloBoostDb = 6.f;
+const float kLoudnessDb = 6.f;
+
+/** A boost counts as engaged when it is up at all, not only at exactly the
+    value the face sets. Someone who moves the Advanced slider to +2 dB has
+    boosted the Side, and a face that showed that as off would be lying about
+    the panel it is a view of. */
+bool engaged(float db) {
+	return db > 0.5f;
+}
+
+face::Model readFaceModel() {
+	const RealMonoSettings s = uiSettings();
+	face::Model m;
+	m.mono = s.enabled;
+	m.solo = engaged(s.sideInjectDb);
+	m.highestQuality = s.hqMode;
+	m.loudness = engaged(s.outputGainDb);
+	m.running = g.engine.running();
+	return m;
+}
+
+void faceSetMono(bool on) {
+	setChecked(g.enableCheck, on);
+	pushParams();
+}
+
+void faceSetSolo(bool on) {
+	setSlider(SL_INJECT, on ? kSoloBoostDb : 0.f);
+	refreshValueLabels();
+	pushParams();
+}
+
+void faceSetHighestQuality(bool on) {
+	setChecked(g.hqCheck, on);
+	pushParams();
+}
+
+void faceSetLoudness(bool on) {
+	setSlider(SL_OUTPUT, on ? kLoudnessDb : 0.f);
+	refreshValueLabels();
+	pushParams();
+}
+
+void faceOpenPanel() {
+	if (!g.panel)
+		return;
+	ShowWindow(g.panel, SW_SHOW);
+	if (IsIconic(g.panel))
+		ShowWindow(g.panel, SW_RESTORE);
+	SetForegroundWindow(g.panel);
+}
+
+/** Closing the face closes the app. The audio threads go first, then the
+    timer that reads them, then the panel whose controls everything else
+    reads -- the same ordering the single window had, spelled out now that
+    there are two of them. */
+void faceClose() {
+	if (g.panel)
+		KillTimer(g.panel, IDT_REFRESH);
+	g.engine.stop();
+	if (g.panel) {
+		DestroyWindow(g.panel);
+		g.panel = nullptr;
+	}
 }
 
 
@@ -630,9 +723,9 @@ void refreshDevices() {
 	// Loopback taps a playback endpoint, so the source list becomes the render
 	// list. Same combo, different meaning -- the banner says which.
 	if (!enumerateDevices(loopback ? eRender : eCapture, g.captureDevices, err))
-		MessageBoxW(g.main, err.c_str(), kAppName, MB_ICONWARNING | MB_OK);
+		MessageBoxW(g.panel, err.c_str(), kAppName, MB_ICONWARNING | MB_OK);
 	if (!enumerateDevices(eRender, g.renderDevices, err))
-		MessageBoxW(g.main, err.c_str(), kAppName, MB_ICONWARNING | MB_OK);
+		MessageBoxW(g.panel, err.c_str(), kAppName, MB_ICONWARNING | MB_OK);
 
 	fillCombo(g.captureCombo, g.captureDevices, !loopback);
 	fillCombo(g.renderCombo, g.renderDevices, false);
@@ -654,7 +747,7 @@ void chooseFile() {
 
 	OPENFILENAMEW ofn = {};
 	ofn.lStructSize = sizeof(ofn);
-	ofn.hwndOwner = g.main;
+	ofn.hwndOwner = g.panel;
 	// Filters are double-null terminated pairs, which is why these look like
 	// they are missing their separators.
 	ofn.lpstrFilter =
@@ -680,7 +773,7 @@ void chooseFile() {
 	if (!ok) {
 		SetWindowTextW(g.filePathLabel, L"");
 		updateBanner();
-		MessageBoxW(g.main, err.c_str(), L"Real Mono Sound \x2014 could not load that file",
+		MessageBoxW(g.panel, err.c_str(), L"Real Mono Sound \x2014 could not load that file",
 		            MB_ICONWARNING | MB_OK);
 		return;
 	}
@@ -696,7 +789,7 @@ void chooseFile() {
 	// was too long to hold, so far. It is playable either way, so this is told
 	// after the UI has already accepted it.
 	if (!err.empty())
-		MessageBoxW(g.main, err.c_str(), kAppName, MB_ICONINFORMATION | MB_OK);
+		MessageBoxW(g.panel, err.c_str(), kAppName, MB_ICONINFORMATION | MB_OK);
 }
 
 
@@ -714,6 +807,11 @@ void updateStartButton() {
 	EnableWindow(g.srcLoopback, !running);
 	EnableWindow(g.srcFile, !running);
 	refreshSourceControls();
+	// The face's background follows the engine rather than the buttons -- idle
+	// until audio is actually moving -- and the engine can stop without anyone
+	// clicking anything: a device error, or a file reaching its end. Every one
+	// of those paths comes through here.
+	face::refresh();
 }
 
 void toggleEngine() {
@@ -735,7 +833,7 @@ void toggleEngine() {
 	const SourceMode mode = sourceMode();
 	const LRESULT renSel = SendMessageW(g.renderCombo, CB_GETCURSEL, 0, 0);
 	if (renSel == CB_ERR) {
-		MessageBoxW(g.main, L"Choose a playback device first.",
+		MessageBoxW(g.panel, L"Choose a playback device first.",
 		            kAppName, MB_ICONINFORMATION | MB_OK);
 		return;
 	}
@@ -748,7 +846,7 @@ void toggleEngine() {
 
 	if (cfg.fromFile) {
 		if (!g.engine.fileInfo().loaded) {
-			MessageBoxW(g.main, L"Choose a file to play first.",
+			MessageBoxW(g.panel, L"Choose a file to play first.",
 			            kAppName, MB_ICONINFORMATION | MB_OK);
 			return;
 		}
@@ -756,7 +854,7 @@ void toggleEngine() {
 	else {
 		const LRESULT capSel = SendMessageW(g.captureCombo, CB_GETCURSEL, 0, 0);
 		if (capSel == CB_ERR) {
-			MessageBoxW(g.main, L"Choose a source device first.",
+			MessageBoxW(g.panel, L"Choose a source device first.",
 			            kAppName, MB_ICONINFORMATION | MB_OK);
 			return;
 		}
@@ -768,7 +866,7 @@ void toggleEngine() {
 	// that goes to full scale in well under a second, so it is refused rather
 	// than warned about.
 	if (cfg.loopback && cfg.captureId == cfg.renderId) {
-		MessageBoxW(g.main,
+		MessageBoxW(g.panel,
 		            L"Loopback cannot tap the same device it plays to \x2014 the output would be "
 		            L"captured and fed back through the chain.\n\n"
 		            L"Pick a different playback device, or use a virtual audio cable instead, "
@@ -785,7 +883,7 @@ void toggleEngine() {
 
 	std::wstring err;
 	if (!g.engine.start(cfg, err)) {
-		MessageBoxW(g.main, err.c_str(), L"Real Mono Sound \x2014 could not start",
+		MessageBoxW(g.panel, err.c_str(), L"Real Mono Sound \x2014 could not start",
 		            MB_ICONERROR | MB_OK);
 		SetWindowTextW(g.status, L"Failed to start.");
 		SetWindowTextW(g.status2, L"");
@@ -874,7 +972,7 @@ void onTimer() {
 		updateStartButton();
 		SetWindowTextW(g.status, L"Stopped after a device error.");
 		SetWindowTextW(g.status2, L"");
-		MessageBoxW(g.main, asyncError.c_str(), L"Real Mono Sound \x2014 audio stopped",
+		MessageBoxW(g.panel, asyncError.c_str(), L"Real Mono Sound \x2014 audio stopped",
 		            MB_ICONERROR | MB_OK);
 		return;
 	}
@@ -940,8 +1038,8 @@ void onTimer() {
 HWND child(const wchar_t* cls, const wchar_t* text, DWORD style,
            int x, int y, int w, int h, int id) {
 	HWND hwnd = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style,
-	                            x, y, w, h, g.main, HMENU(INT_PTR(id)),
-	                            HINSTANCE(GetWindowLongPtrW(g.main, GWLP_HINSTANCE)), nullptr);
+	                            x, y, w, h, g.panel, HMENU(INT_PTR(id)),
+	                            HINSTANCE(GetWindowLongPtrW(g.panel, GWLP_HINSTANCE)), nullptr);
 	if (hwnd && g.font)
 		SendMessageW(hwnd, WM_SETFONT, WPARAM(g.font), TRUE);
 	return hwnd;
@@ -1157,7 +1255,7 @@ void showAdvanced(bool show) {
 		ShowWindow(control, show ? SW_SHOW : SW_HIDE);
 	SetWindowTextW(g.advancedButton, show ? L"Advanced \x25B2" : L"Advanced \x25BC");
 
-	const DWORD style = DWORD(GetWindowLongPtrW(g.main, GWL_STYLE));
+	const DWORD style = DWORD(GetWindowLongPtrW(g.panel, GWL_STYLE));
 	RECT wanted = {0, 0, 660, show ? kAdvancedHeight : kBaseHeight};
 	AdjustWindowRect(&wanted, style, FALSE);
 	const int width = wanted.right - wanted.left;
@@ -1170,7 +1268,7 @@ void showAdvanced(bool show) {
 	int x = 0, y = 0;
 	UINT flags = SWP_NOMOVE | SWP_NOZORDER;
 	RECT current = {};
-	if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0) && GetWindowRect(g.main, &current)) {
+	if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0) && GetWindowRect(g.panel, &current)) {
 		x = current.left;
 		y = current.top;
 		if (y + height > work.bottom)
@@ -1179,7 +1277,7 @@ void showAdvanced(bool show) {
 			x = std::max(int(work.left), int(work.right) - width);
 		flags = SWP_NOZORDER;
 	}
-	SetWindowPos(g.main, nullptr, x, y, width, height, flags);
+	SetWindowPos(g.panel, nullptr, x, y, width, height, flags);
 }
 
 void buildUi() {
@@ -1210,7 +1308,7 @@ void buildUi() {
 LRESULT CALLBACK mainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 	switch (msg) {
 		case WM_CREATE:
-			g.main = hwnd;
+			g.panel = hwnd;
 			buildUi();
 			refreshDevices();
 			// Opening on the shipping preset means the defaults on screen are
@@ -1322,21 +1420,46 @@ LRESULT CALLBACK mainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 			return 0;
 
 		case WM_CLOSE:
-			// Stop the audio threads before the window goes away: they publish
-			// into g, and g outliving them is the only ordering that is safe.
-			g.engine.stop();
-			DestroyWindow(hwnd);
+			// Put the panel away rather than shutting down: the face is the
+			// app, and every setting the face reads is a control in here, so
+			// destroying this window would leave it reading nothing. Ctrl+A on
+			// the face brings it back.
+			ShowWindow(hwnd, SW_HIDE);
 			return 0;
 
 		case WM_DESTROY:
+			// Reached only when the face is closing and has already stopped
+			// the engine -- see faceClose. Quitting is the face's to do.
 			KillTimer(hwnd, IDT_REFRESH);
-			PostQuitMessage(0);
 			return 0;
 
 		default:
 			break;
 	}
 	return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+
+/** Sets the panel down to the right of the face, walked back inside the work
+    area if it does not fit there. Both are on screen at launch because nothing
+    can play until a playback device has been chosen and Start has been
+    pressed, and both of those are in the panel. */
+void placePanelBeside(HWND face, HWND panel) {
+	RECT faceRect = {}, panelRect = {}, work = {};
+	if (!GetWindowRect(face, &faceRect) || !GetWindowRect(panel, &panelRect))
+		return;
+	if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0))
+		return;
+
+	const int w = panelRect.right - panelRect.left;
+	const int h = panelRect.bottom - panelRect.top;
+	int x = faceRect.right + 12;
+	int y = faceRect.top;
+	if (x + w > work.right)
+		x = std::max(int(work.left), int(work.right) - w);
+	if (y + h > work.bottom)
+		y = std::max(int(work.top), int(work.bottom) - h);
+	SetWindowPos(panel, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 } // namespace
@@ -1346,6 +1469,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
 	// The GUI thread only enumerates devices; the audio threads make their own
 	// MTA. An STA here is the conventional choice for a window thread.
 	const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+	// GDI+ draws the face. It is a Windows system library rather than a
+	// third-party dependency -- the same argument Media Foundation gets for the
+	// file player -- and it is the only drawing API in the box that decodes the
+	// client's JPEGs, takes their fonts from memory without installing them,
+	// and antialiases a curve.
+	Gdiplus::GdiplusStartupInput gdiplusInput;
+	ULONG_PTR gdiplusToken = 0;
+	const bool gdiplusReady =
+	    Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusInput, nullptr) == Gdiplus::Ok;
+	if (!gdiplusReady) {
+		MessageBoxW(nullptr, L"Could not start GDI+, which draws the interface.", kAppName,
+		            MB_ICONERROR | MB_OK);
+		return 1;
+	}
 
 	INITCOMMONCONTROLSEX icc = {};
 	icc.dwSize = sizeof(icc);
@@ -1360,50 +1498,84 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
 	meterClass.lpszClassName = L"RealMonoMeter";
 	RegisterClassExW(&meterClass);
 
-	WNDCLASSEXW mainClass = {};
-	mainClass.cbSize = sizeof(mainClass);
-	mainClass.lpfnWndProc = mainProc;
-	mainClass.hInstance = instance;
-	mainClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-	mainClass.hbrBackground = HBRUSH(COLOR_BTNFACE + 1);
-	mainClass.lpszClassName = L"RealMonoSoundMain";
-	if (!RegisterClassExW(&mainClass)) {
-		MessageBoxW(nullptr, L"Could not register the window class.", kAppName,
+	WNDCLASSEXW panelClass = {};
+	panelClass.cbSize = sizeof(panelClass);
+	panelClass.lpfnWndProc = mainProc;
+	panelClass.hInstance = instance;
+	panelClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+	panelClass.hbrBackground = HBRUSH(COLOR_BTNFACE + 1);
+	panelClass.lpszClassName = L"RealMonoSoundPanel";
+	if (!RegisterClassExW(&panelClass) || !face::registerClass(instance)) {
+		MessageBoxW(nullptr, L"Could not register the window classes.", kAppName,
 		            MB_ICONERROR | MB_OK);
 		return 1;
 	}
 
+	// The panel is built first and built unconditionally, whether or not it is
+	// ever looked at: its controls are where every setting lives, and the face
+	// is a view of them. A face over an unbuilt panel is a face with nothing
+	// behind it.
+	//
 	// Fixed size: the layout is absolute, and a resizable window that does not
 	// re-lay-out is worse than one that cannot be resized. The one height
-	// change is the Advanced page, which the app makes itself.
-	const DWORD style = (WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX));
+	// change is the Advanced section, which the panel makes itself.
+	const DWORD panelStyle = (WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX));
 	RECT wanted = {0, 0, 660, kBaseHeight};
-	AdjustWindowRect(&wanted, style, FALSE);
+	AdjustWindowRect(&wanted, panelStyle, FALSE);
 
-	HWND window = CreateWindowExW(0, mainClass.lpszClassName,
-	                              L"Real Mono Sound \x2014 stereo to true mono",
-	                              style, CW_USEDEFAULT, CW_USEDEFAULT,
-	                              wanted.right - wanted.left, wanted.bottom - wanted.top,
-	                              nullptr, nullptr, instance, nullptr);
+	HWND panel = CreateWindowExW(0, panelClass.lpszClassName,
+	                             L"Real Mono Sound \x2014 routing & advanced",
+	                             panelStyle, CW_USEDEFAULT, CW_USEDEFAULT,
+	                             wanted.right - wanted.left, wanted.bottom - wanted.top,
+	                             nullptr, nullptr, instance, nullptr);
+	if (!panel) {
+		MessageBoxW(nullptr, L"Could not create the routing window.", kAppName,
+		            MB_ICONERROR | MB_OK);
+		return 1;
+	}
+
+	face::Host host;
+	host.read = readFaceModel;
+	host.setMono = faceSetMono;
+	host.setSolo = faceSetSolo;
+	host.setHighestQuality = faceSetHighestQuality;
+	host.setLoudness = faceSetLoudness;
+	host.openPanel = faceOpenPanel;
+	host.close = faceClose;
+
+	HWND window = face::create(instance, host);
 	if (!window) {
 		MessageBoxW(nullptr, L"Could not create the window.", kAppName, MB_ICONERROR | MB_OK);
 		return 1;
 	}
 
+	placePanelBeside(window, panel);
+	// The panel comes up without taking the focus, so the face is what the
+	// client is looking at even though the first thing to do is in the panel.
+	ShowWindow(panel, SW_SHOWNOACTIVATE);
+	UpdateWindow(panel);
 	ShowWindow(window, show);
 	UpdateWindow(window);
 
 	MSG msg;
 	while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-		// IsDialogMessage gives tab traversal and arrow keys on the trackbars.
-		if (!IsDialogMessageW(window, &msg)) {
+		// IsDialogMessage gives tab traversal and arrow keys on the trackbars,
+		// and it is asked only while the panel is the active window: the face
+		// has no controls to traverse, and handing it dialog messages would
+		// swallow its own keys.
+		const bool forPanel = g.panel && GetActiveWindow() == g.panel;
+		if (!forPanel || !IsDialogMessageW(g.panel, &msg)) {
 			TranslateMessage(&msg);
 			DispatchMessageW(&msg);
 		}
 	}
 
+	// The artwork before GDI+ goes, or the bitmaps are freed against a library
+	// that has already shut down.
+	face::shutdown();
 	if (g.font)
 		DeleteObject(g.font);
+	Gdiplus::GdiplusShutdown(gdiplusToken);
 	if (SUCCEEDED(comHr))
 		CoUninitialize();
 	return int(msg.wParam);

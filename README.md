@@ -5,7 +5,7 @@ application — a browser tab, a streaming service, a media player — converts 
 to a **true mono-compatible** signal, and plays only that to your speakers. The
 original stereo never reaches an output device.
 
-![The app running](docs/ui-running.png)
+![The app running](docs/face-mono.png)
 
 The point is what happens to the difference between the two channels. A plain
 `(L+R)/2` downmix cancels it: anything panned wide, anything in anti-phase, the
@@ -178,11 +178,58 @@ installs), or convert the file. Everything else works out of the box.
 
 ## The interface
 
+Two windows, and only one of them is the product.
+
+### The face
+
+<p align="center">
+  <img src="docs/face-idle.png" width="270" alt="Idle">
+  <img src="docs/face-stereo.png" width="270" alt="Stereo, playing">
+  <img src="docs/face-mono.png" width="270" alt="Mono, playing">
+</p>
+
+The client's screen, and the whole of what a listener touches. Five things to
+press:
+
+| Control | What it does | Where it lands |
+| --- | --- | --- |
+| **Real Mono Sound** | Nothing. It is the heading, and it is grey in every one of the client's screens. | — |
+| **Stereo** | Hear the original, untouched. | global bypass off |
+| **Mono** | Hear the Real Mono feed. | global bypass on |
+| **SOLO Augmented Content** | Lift the recovered difference content *inside* the mix, so what a plain downmix throws away is what you notice. | Side inject, +6 dB |
+| **Highest Quality Mode** | The −3 dB input trim, so the sum keeps its dynamics instead of being handed back by the limiter. | Stage 0 |
+| **LOUDNESS** | Drive the output 6 dB harder into the limiter: peaks stay where they were, everything under them comes up. | output gain, +6 dB |
+
+Stereo and Mono are one setting drawn as two buttons, so exactly one of them is
+yellow at all times. That pair is the A/B the whole product exists for.
+
+**The background is driven by the engine, not by the buttons.** It is the idle
+plate until audio is actually moving; then the band doing the work lights up —
+the red sides for a stereo pass-through, the green centre for the mono feed.
+Which is the client's own visual argument for what the product does, so it goes
+dark again the moment the audio stops rather than agreeing with a button that
+is merely selected.
+
+The three **?** buttons open the explanation for what they sit next to. The one
+on the banner also says where the routing went.
+
+Nothing on the face keeps its own state: every control is read back out of the
+panel below, and pressing one moves the panel's control. Two windows each
+holding their own idea of whether the limiter is on is two windows that will
+one day disagree, and the one the client is looking at will be the wrong one.
+
+### The Routing & Advanced panel
+
 ![Idle](docs/ui-idle.png)
 
-Four controls, because that is what the demo has: a preset, the global enable,
-highest quality mode, and the limiter ceiling. The global enable is a genuine
-stereo pass-through, so it is the A/B.
+Where the devices are chosen, where **Start** is, and where every setting
+actually lives. It opens beside the face at launch, because nothing can play
+until someone has been in here. Closing it puts it away rather than shutting
+the app down; **Ctrl+A** on the face brings it back, as does *Routing &
+Advanced…* on the face's system menu (Alt+Space).
+
+Four controls on its front page, because that is what the demo has: a preset,
+the global enable, highest quality mode, and the limiter ceiling.
 
 The routing row above them is one line because the three sources are mutually
 exclusive: the row underneath it changes meaning with the choice — an endpoint
@@ -324,9 +371,16 @@ is worse than an absent one. The FIR path is where it would go.
 
 Needs Visual Studio 2022 (or Build Tools) with the C++ workload, the Windows
 SDK, and CMake 3.20+. Built and tested with MSVC 19.44 / Windows SDK 10.0.26100.
-No third-party dependency: the DSP is all in `src/RealMono.h`, and the file
+
+Still no third-party dependency. The DSP is all in `src/RealMono.h`; the file
 player's compressed formats go through Windows' own Media Foundation codecs
-rather than a vendored decoder.
+rather than a vendored decoder; and the face is drawn with GDI+, which decodes
+the client's JPEGs, takes their fonts from memory without installing them, and
+antialiases the curves. All three are Windows system libraries, not vendored
+code.
+
+The artwork in `resources/` is compiled into the executable (`src/Resources.rc`),
+so the exe is the whole deliverable — there is no folder beside it to lose.
 
 ```sh
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
@@ -409,8 +463,22 @@ app's **File** source, which decodes it with Windows' own codecs.
 
 **Verified on the build machine** (Windows 10 Pro 19045, Realtek HD Audio):
 
-- Builds clean at `/W4`, both targets.
+- Builds clean at `/W4`, all three targets.
 - All 71 offline checks pass.
+- **The face, driven end to end.** Every control was clicked and the panel read
+  back afterwards: Stereo and Mono move the global bypass, the switch checks
+  highest quality mode, and SOLO and LOUDNESS land on exactly +6.0 dB of Side
+  inject and +6.0 dB of output. The three background plates were seen in all
+  three of their states — idle while stopped, red while passing stereo through,
+  green while playing the mono feed — and the switch between them follows the
+  engine, not the button.
+- **The two-window lifecycle.** Closing the panel hides it and leaves the app
+  running; the face's system-menu item brings it back; closing the face stops
+  the audio threads and exits cleanly with the engine still running at the time
+  it was asked to.
+- Every screenshot in this file is a render of the current build's own window
+  (`PrintWindow`), not a screen grab, so none of them can drift from what the
+  code draws without being obvious.
 - The app starts, runs the new chain live at 48 kHz for 6 s with **zero drops**,
   keeps the drift controller inside 0.01% of unity, and reports 15.6 ms of chain
   latency as part of the round trip. The ring readout is sampled from the GUI
@@ -469,7 +537,18 @@ app's **File** source, which decodes it with Windows' own codecs.
   silence rather than the signal. For multi-room the front pair is what the
   zones take, but a centre channel would want the same feed.
 - **Settings are not saved.** Device choice, preset, the chosen file and every
-  control return to their defaults on restart.
+  control return to their defaults on restart. The face opens on the shipping
+  preset, so highest quality mode starts off — the client's screens show the
+  switch on, but `RealMono_Default` says off and the tests assert it.
+- **The banner strip is generated, not supplied.** The three background plates
+  and the three type faces came from the client; the grey marble the banner sits
+  on did not, so `src/Skin.h` draws it — light stone with darker veins, from a
+  fixed seed. If the real artwork turns up it is a file in `resources/images`,
+  an id in `Resources.h`, and a one-line change.
+- **The panel's file-path label does not paint**, though it holds the right text
+  and reports itself visible. It predates this work — the same blank row is in
+  the previous build's screenshot — and the file name is also in the banner
+  underneath it, so nothing is unreachable. Not yet chased down.
 - **The File source is a test player, not a media player.** Play, pause, seek,
   loop and stop; no playlist, no waveform, no output recording.
 - **Files are held in memory, capped at ten minutes.** A longer one loads its
