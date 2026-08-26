@@ -53,7 +53,7 @@ using Gdiplus::RectF;
     they will, and a colour written into eight draw calls is a colour that ends
     up as seven of one and one of another. */
 
-const Color kBannerText(255, 0, 176, 66);    // the green on the marble strip
+const Color kBannerText(255, 41, 249, 241);   // the cyan on the marble strip
 const Color kBannerOutline(255, 12, 22, 14);  // and the stroke that makes it survive the veins
 const Color kPlate(255, 160, 160, 160);      // an inactive button
 const Color kPlateHot(255, 184, 184, 184);   // ... under the pointer
@@ -186,16 +186,35 @@ inline void drawHelp(Gdiplus::Graphics& g, const RectF& r, bool hot,
 
 	if (!family)
 		return;
+
+	/*  Centred on its own ink rather than on the font's line box.
+
+	    A question mark does not fill its em square -- no descender, and the
+	    ink sits high in the box -- so aligning the box centres the empty space
+	    as well as the glyph and the mark ends up visibly low and slightly off
+	    to one side. Nudging it by a hand-picked fraction was the first fix and
+	    it was only right for one font at one size.
+
+	    So: lay the glyph out at the origin, ask the path what it actually
+	    covers, and translate that to the middle of the ball. Correct for any
+	    face, any size, and any glyph that might replace it. */
 	Gdiplus::StringFormat format;
-	format.SetAlignment(Gdiplus::StringAlignmentCenter);
-	format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+	format.SetAlignment(Gdiplus::StringAlignmentNear);
+	format.SetLineAlignment(Gdiplus::StringAlignmentNear);
 	format.SetFormatFlags(Gdiplus::StringFormatFlagsNoClip | Gdiplus::StringFormatFlagsNoWrap);
 
-	// Nudged up by a hair: a question mark's ink sits below its own box centre,
-	// so centring the box leaves it looking like it has slipped.
-	const RectF box(r.X, r.Y - r.Height * 0.06f, r.Width, r.Height);
 	Gdiplus::GraphicsPath glyph;
-	glyph.AddString(L"?", -1, family, Gdiplus::FontStyleBold, r.Height * 0.60f, box, &format);
+	glyph.AddString(L"?", -1, family, Gdiplus::FontStyleBold, r.Height * 0.58f,
+	                Gdiplus::PointF(0.f, 0.f), &format);
+
+	RectF drawn;
+	if (glyph.GetBounds(&drawn) == Gdiplus::Ok && drawn.Width > 0.f && drawn.Height > 0.f) {
+		Gdiplus::Matrix move;
+		move.Translate(r.X + r.Width * 0.5f - (drawn.X + drawn.Width * 0.5f),
+		               r.Y + r.Height * 0.5f - (drawn.Y + drawn.Height * 0.5f));
+		glyph.Transform(&move);
+	}
+
 	Gdiplus::Pen stroke(kHelpGlyphEdge, (std::max)(1.f, r.Width * 0.075f));
 	stroke.SetLineJoin(Gdiplus::LineJoinRound);
 	g.DrawPath(&stroke, &glyph);

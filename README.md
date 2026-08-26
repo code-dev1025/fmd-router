@@ -183,9 +183,9 @@ Two windows, and only one of them is the product.
 ### The face
 
 <p align="center">
-  <img src="docs/face-idle.png" width="270" alt="Idle">
-  <img src="docs/face-stereo.png" width="270" alt="Stereo, playing">
-  <img src="docs/face-mono.png" width="270" alt="Mono, playing">
+  <img src="docs/face-idle.png" width="270" alt="As it opens">
+  <img src="docs/face-stereo.png" width="270" alt="Stereo">
+  <img src="docs/face-mono.png" width="270" alt="Mono">
 </p>
 
 The client's screen, and the whole of what a listener touches. Five things to
@@ -203,12 +203,17 @@ press:
 Stereo and Mono are one setting drawn as two buttons, so exactly one of them is
 yellow at all times. That pair is the A/B the whole product exists for.
 
-**The background is driven by the engine, not by the buttons.** It is the idle
-plate until audio is actually moving; then the band doing the work lights up —
-the red sides for a stereo pass-through, the green centre for the mono feed.
-Which is the client's own visual argument for what the product does, so it goes
-dark again the moment the audio stops rather than agreeing with a button that
-is merely selected.
+**The three backgrounds are a sequence, not three equals.** The app opens on
+the idle plate — which is what the client's second and third screens show, a
+fresh launch with Mono preselected and nothing yet pressed — and choosing a
+side lights that side's plate: the red flanks for a stereo pass-through, the
+green centre for the mono feed. Their first screen is the same app after
+*Stereo* has been pressed.
+
+It changes on the press, not on Start, and it notices the choice when it is
+made from the panel too. A background that waited for audio would mean pressing
+a button changed nothing until you pressed a second one, and a background that
+followed only one of the two windows would be lying about the other.
 
 The three **?** buttons open the explanation for what they sit next to. The one
 on the banner also says where the routing went.
@@ -468,10 +473,10 @@ app's **File** source, which decodes it with Windows' own codecs.
 - **The face, driven end to end.** Every control was clicked and the panel read
   back afterwards: Stereo and Mono move the global bypass, the switch checks
   highest quality mode, and SOLO and LOUDNESS land on exactly +6.0 dB of Side
-  inject and +6.0 dB of output. The three background plates were seen in all
-  three of their states — idle while stopped, red while passing stereo through,
-  green while playing the mono feed — and the switch between them follows the
-  engine, not the button.
+  inject and +6.0 dB of output. All three background plates were seen in their
+  own states — idle as the app opens, red the instant *Stereo* is pressed,
+  green the instant *Mono* is — with the engine stopped throughout, which is
+  the case that has to work if the press is to be feedback at all.
 - **The two-window lifecycle.** Closing the panel hides it and leaves the app
   running; the face's system-menu item brings it back; closing the face stops
   the audio threads and exits cleanly with the engine still running at the time

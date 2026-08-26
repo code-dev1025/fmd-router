@@ -136,6 +136,21 @@ int g_hot = WNone;
 int g_pressed = WNone;
 bool g_tracking = false;
 
+/*  Whether Stereo or Mono has been chosen yet, which is what selects the
+    background plate.
+
+    The client supplied three, and the three are a sequence rather than three
+    equals: the app opens on the idle plate -- which is the one their own
+    second and third screens show, freshly launched with Mono preselected and
+    nothing yet pressed -- and picking a side lights that side's plate. Their
+    first screen is the same app after Stereo has been pressed.
+
+    It is deliberately not tied to whether audio is playing. An earlier
+    version did that and it meant pressing a button changed nothing until
+    Start was pressed too, which is not feedback. */
+bool g_chosen = false;
+int g_lastMono = -1;  // -1 until the first paint has something to compare against
+
 
 /*  ------------------------------------------------------------------ helpers */
 
@@ -227,13 +242,22 @@ void paint(HWND hwnd, HDC dc) {
 	const FontFamily* serif = g_assets->serifFace();
 
 	// ------------------------------------------------------------ background
-	// Idle until something is actually playing; then the band that is doing
-	// the work lights up -- the red sides for a stereo pass-through, the green
-	// centre for the mono feed. Which is the client's own visual argument for
-	// what the product does, so it is driven by the engine and not by the
-	// button, and it goes dark again the moment the audio stops.
-	const int plate = !m.running ? skin::PlateIdle
-	                             : (m.mono ? skin::PlateMono : skin::PlateStereo);
+	// The idle plate until a side has been chosen, then the plate for whichever
+	// side it was: the red flanks lit for a stereo pass-through, the green
+	// centre lit for the mono feed. Which is the client's own visual argument
+	// for what the product does.
+	//
+	// The choice is also noticed when it is made from the panel rather than
+	// here, because it is the same setting either way and a background that
+	// only followed one of the two windows would be a background that lies
+	// about the other.
+	const int monoNow = m.mono ? 1 : 0;
+	if (g_lastMono >= 0 && monoNow != g_lastMono)
+		g_chosen = true;
+	g_lastMono = monoNow;
+
+	const int plate = !g_chosen ? skin::PlateIdle
+	                            : (m.mono ? skin::PlateMono : skin::PlateStereo);
 	if (Bitmap* background = g_assets->background(plate, cw, ch))
 		g.DrawImage(background, Rect(0, 0, cw, ch), 0, 0, cw, ch, UnitPixel);
 	else
@@ -347,10 +371,15 @@ void activate(HWND hwnd, int widget) {
 	const Model m = g_host.read();
 	switch (widget) {
 		case WStereo:
+			// Pressing either side counts as choosing, even when it is the side
+			// that was already selected -- it is still the moment the user said
+			// which one they want, and the plate should light for it.
+			g_chosen = true;
 			if (g_host.setMono)
 				g_host.setMono(false);
 			break;
 		case WMono:
+			g_chosen = true;
 			if (g_host.setMono)
 				g_host.setMono(true);
 			break;
