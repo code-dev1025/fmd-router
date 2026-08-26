@@ -35,16 +35,16 @@ struct Box {
 };
 
 constexpr Box kBanner      = {  0.f,   0.f, 391.f,  48.f};
-constexpr Box kBannerHelp  = {356.f,  22.f,  23.f,  23.f};
+constexpr Box kBannerHelp  = {354.f,  20.f,  27.f,  27.f};
 constexpr Box kTitle       = { 34.f,  76.f, 323.f,  73.f};
 constexpr Box kStereo      = { 42.f, 158.f, 150.f,  73.f};
 constexpr Box kMono        = {200.f, 158.f, 147.f,  73.f};
 constexpr Box kSolo        = {123.f, 258.f, 145.f, 148.f};
 constexpr Box kSwitch      = { 38.f, 483.f,  52.f,  28.f};
 constexpr Box kQualityText = { 96.f, 470.f, 256.f,  54.f};
-constexpr Box kQualityHelp = {357.f, 485.f,  23.f,  23.f};
+constexpr Box kQualityHelp = {356.f, 484.f,  25.f,  25.f};
 constexpr Box kLoudness    = { 98.f, 604.f, 196.f,  86.f};
-constexpr Box kLoudHelp    = {299.f, 634.f,  23.f,  23.f};
+constexpr Box kLoudHelp    = {298.f, 633.f,  25.f,  25.f};
 
 /*  The client's wording, verbatim. It is expected to be revised, so it is
     gathered here rather than spelled inline at each draw call -- and the
@@ -135,6 +135,21 @@ Bitmap* g_backBuffer = nullptr;
 int g_hot = WNone;
 int g_pressed = WNone;
 bool g_tracking = false;
+
+/*  Whether Stereo or Mono has been chosen yet, which is what selects the
+    background plate.
+
+    The client supplied three, and the three are a sequence rather than three
+    equals: the app opens on the idle plate -- which is the one their own
+    second and third screens show, freshly launched with Mono preselected and
+    nothing yet pressed -- and picking a side lights that side's plate. Their
+    first screen is the same app after Stereo has been pressed.
+
+    It is deliberately not tied to whether audio is playing. An earlier
+    version did that and it meant pressing a button changed nothing until
+    Start was pressed too, which is not feedback. */
+bool g_chosen = false;
+int g_lastMono = -1;  // -1 until the first paint has something to compare against
 
 
 /*  ------------------------------------------------------------------ helpers */
@@ -227,13 +242,22 @@ void paint(HWND hwnd, HDC dc) {
 	const FontFamily* serif = g_assets->serifFace();
 
 	// ------------------------------------------------------------ background
-	// Idle until something is actually playing; then the band that is doing
-	// the work lights up -- the red sides for a stereo pass-through, the green
-	// centre for the mono feed. Which is the client's own visual argument for
-	// what the product does, so it is driven by the engine and not by the
-	// button, and it goes dark again the moment the audio stops.
-	const int plate = !m.running ? skin::PlateIdle
-	                             : (m.mono ? skin::PlateMono : skin::PlateStereo);
+	// The idle plate until a side has been chosen, then the plate for whichever
+	// side it was: the red flanks lit for a stereo pass-through, the green
+	// centre lit for the mono feed. Which is the client's own visual argument
+	// for what the product does.
+	//
+	// The choice is also noticed when it is made from the panel rather than
+	// here, because it is the same setting either way and a background that
+	// only followed one of the two windows would be a background that lies
+	// about the other.
+	const int monoNow = m.mono ? 1 : 0;
+	if (g_lastMono >= 0 && monoNow != g_lastMono)
+		g_chosen = true;
+	g_lastMono = monoNow;
+
+	const int plate = !g_chosen ? skin::PlateIdle
+	                            : (m.mono ? skin::PlateMono : skin::PlateStereo);
 	if (Bitmap* background = g_assets->background(plate, cw, ch))
 		g.DrawImage(background, Rect(0, 0, cw, ch), 0, 0, cw, ch, UnitPixel);
 	else
@@ -247,25 +271,33 @@ void paint(HWND hwnd, HDC dc) {
 
 	{
 		const FontFamily* mono = g_assets->bannerFace();
-		const float start = kBanner.h * t.scale * 0.44f;
+		const float start = kBanner.h * t.scale * 0.46f;
 		// The first line has the strip to itself and takes the full width; the
 		// second shares its row with the help button, so it has to stop short
 		// of it at both ends -- it is centred, and a heading that clears the
 		// button on one side and slides under it on the other is worse than a
 		// slightly smaller one.
 		const float clear = (kDesignW - kBannerHelp.x) * t.scale;
+		// The measured width is trimmed a little further than the box, because
+		// the stroke below sits outside the letterforms and the measurement does
+		// not know about it.
 		const float first = skin::fitSize(g, kBannerLine1, mono, FontStyleBold, start,
-		                                  float(cw) - 12.f * t.scale);
+		                                  float(cw) - 14.f * t.scale);
 		const float second = skin::fitSize(g, kBannerLine2, mono, FontStyleBold, start,
 		                                   float(cw) - clear * 2.f);
 		// One size for both, or they read as two headings rather than one that
 		// happens to take two lines.
 		const float em = (std::min)(first, second);
 		const float half = float(bannerH) * 0.5f;
-		skin::drawText(g, kBannerLine1, mono, em, FontStyleBold, skin::kBannerText,
-		               RectF(0.f, 0.f, float(cw), half), &skin::kBannerShade);
-		skin::drawText(g, kBannerLine2, mono, em, FontStyleBold, skin::kBannerText,
-		               RectF(0.f, half, float(cw), half), &skin::kBannerShade);
+		// Thin enough that the counters of the O and the A stay open: a heavier
+		// stroke closes them and the line turns into a green smear.
+		const float stroke = em * 0.12f;
+		skin::drawOutlinedText(g, kBannerLine1, mono, em, FontStyleBold, skin::kBannerText,
+		                       skin::kBannerOutline, stroke,
+		                       RectF(0.f, 0.f, float(cw), half));
+		skin::drawOutlinedText(g, kBannerLine2, mono, em, FontStyleBold, skin::kBannerText,
+		                       skin::kBannerOutline, stroke,
+		                       RectF(0.f, half, float(cw), half));
 	}
 	skin::drawHelp(g, place(kBannerHelp, t), g_hot == WBannerHelp, serif);
 
@@ -339,10 +371,15 @@ void activate(HWND hwnd, int widget) {
 	const Model m = g_host.read();
 	switch (widget) {
 		case WStereo:
+			// Pressing either side counts as choosing, even when it is the side
+			// that was already selected -- it is still the moment the user said
+			// which one they want, and the plate should light for it.
+			g_chosen = true;
 			if (g_host.setMono)
 				g_host.setMono(false);
 			break;
 		case WMono:
+			g_chosen = true;
 			if (g_host.setMono)
 				g_host.setMono(true);
 			break;
