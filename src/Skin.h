@@ -46,6 +46,8 @@ namespace skin {
 using Gdiplus::Color;
 using Gdiplus::RectF;
 
+constexpr float kPiF = 3.14159265f;
+
 /*  ------------------------------------------------------------------ palette
 
     Read off the client's screens. Named here so the whole scheme moves from
@@ -300,7 +302,7 @@ inline void drawText(Gdiplus::Graphics& g, const wchar_t* text,
 inline void drawOutlinedText(Gdiplus::Graphics& g, const wchar_t* text,
                              const Gdiplus::FontFamily* family, float size, int style,
                              const Color& fill, const Color& outline, float thickness,
-                             const RectF& box) {
+                             const RectF& box, float weight = 0.f, float slant = 0.f) {
 	if (!family || !text || size <= 0.f)
 		return;
 	Gdiplus::StringFormat format;
@@ -312,9 +314,41 @@ inline void drawOutlinedText(Gdiplus::Graphics& g, const wchar_t* text,
 	Gdiplus::GraphicsPath path;
 	path.AddString(text, -1, family, style, size, box, &format);
 
-	Gdiplus::Pen pen(outline, (std::max)(1.f, thickness));
-	pen.SetLineJoin(Gdiplus::LineJoinRound);
-	g.DrawPath(&pen, &path);
+	/*  The slant is sheared onto the path rather than asked of the font.
+
+	    The banner face is a memory font with one weight in it, so whether a
+	    real italic exists to be selected depends on what GDI+ decides to
+	    synthesise, and that is not a thing to leave the client's heading
+	    resting on. A shear is the same operation an oblique is, done where the
+	    angle is ours to pick and identical on every machine.
+
+	    Pivoted near the baseline, so the letters lean rather than slide. */
+	if (slant != 0.f) {
+		const float k = std::tan(slant * kPiF / 180.f);
+		const float pivot = box.Y + box.Height * 0.72f;
+		Gdiplus::Matrix lean(1.f, 0.f, -k, 1.f, k * pivot, 0.f);
+		path.Transform(&lean);
+	}
+
+	/*  Weight fattens the letterform by stroking it in its own colour before
+	    it is filled -- the pen is centred on the path, so half of that stroke
+	    lands outside the outline the glyph would otherwise have had.
+
+	    The dark outline is widened by the same amount so that what stays
+	    visible of it is the width it was asked for: it runs from weight/2 out
+	    to (thickness + weight)/2, which is thickness/2 either way. Emboldening
+	    without that would quietly eat the outline in half. */
+	const float bolder = (std::max)(0.f, weight);
+	Gdiplus::Pen edge(outline, (std::max)(1.f, thickness + bolder));
+	edge.SetLineJoin(Gdiplus::LineJoinRound);
+	g.DrawPath(&edge, &path);
+
+	if (bolder > 0.f) {
+		Gdiplus::Pen thicken(fill, bolder);
+		thicken.SetLineJoin(Gdiplus::LineJoinRound);
+		g.DrawPath(&thicken, &path);
+	}
+
 	Gdiplus::SolidBrush brush(fill);
 	g.FillPath(&brush, &path);
 }
@@ -335,8 +369,6 @@ inline void drawOutlinedText(Gdiplus::Graphics& g, const wchar_t* text,
     by fractal noise before you take it. Where the noise is quiet the vein runs
     straight; where it is not, it wanders. Raising the result to a power turns a
     smooth band into a thin sharp line, which is what a vein is. */
-
-constexpr float kPiF = 3.14159265f;
 
 inline float noiseAt(int x, int y, uint32_t seed) {
 	uint32_t h = seed + uint32_t(x) * 0x9E3779B1u + uint32_t(y) * 0x85EBCA77u;

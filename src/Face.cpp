@@ -278,26 +278,33 @@ void paint(HWND hwnd, HDC dc) {
 		// button on one side and slides under it on the other is worse than a
 		// slightly smaller one.
 		const float clear = (kDesignW - kBannerHelp.x) * t.scale;
-		// The measured width is trimmed a little further than the box, because
-		// the stroke below sits outside the letterforms and the measurement does
-		// not know about it.
+		// The measured width is trimmed further than the box, because the stroke
+		// sits outside the letterforms and the lean pushes the top of them
+		// sideways again, and the measurement knows about neither.
 		const float first = skin::fitSize(g, kBannerLine1, mono, FontStyleBold, start,
-		                                  float(cw) - 14.f * t.scale);
+		                                  float(cw) - 22.f * t.scale);
+		// Plus a gap, because the second line shares its row with the ball and
+		// the lean throws the top-right corner of its last letter towards it.
 		const float second = skin::fitSize(g, kBannerLine2, mono, FontStyleBold, start,
-		                                   float(cw) - clear * 2.f);
+		                                   float(cw) - (clear + 9.f * t.scale) * 2.f);
 		// One size for both, or they read as two headings rather than one that
 		// happens to take two lines.
 		const float em = (std::min)(first, second);
 		const float half = float(bannerH) * 0.5f;
 		// Thin enough that the counters of the O and the A stay open: a heavier
-		// stroke closes them and the line turns into a green smear.
+		// stroke closes them and the line turns into a coloured smear.
 		const float stroke = em * 0.12f;
+		// Leaned and thickened, as asked. Twelve degrees is about what a
+		// designed italic leans; the extra weight is small on purpose, because
+		// this face is already carrying a synthetic bold and a stroke.
+		const float weight = em * 0.055f;
+		const float slant = 12.f;
 		skin::drawOutlinedText(g, kBannerLine1, mono, em, FontStyleBold, skin::kBannerText,
 		                       skin::kBannerOutline, stroke,
-		                       RectF(0.f, 0.f, float(cw), half));
+		                       RectF(0.f, 0.f, float(cw), half), weight, slant);
 		skin::drawOutlinedText(g, kBannerLine2, mono, em, FontStyleBold, skin::kBannerText,
 		                       skin::kBannerOutline, stroke,
-		                       RectF(0.f, half, float(cw), half));
+		                       RectF(0.f, half, float(cw), half), weight, slant);
 	}
 	skin::drawHelp(g, place(kBannerHelp, t), g_hot == WBannerHelp, serif);
 
