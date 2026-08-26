@@ -35,16 +35,16 @@ struct Box {
 };
 
 constexpr Box kBanner      = {  0.f,   0.f, 391.f,  48.f};
-constexpr Box kBannerHelp  = {356.f,  22.f,  23.f,  23.f};
+constexpr Box kBannerHelp  = {354.f,  20.f,  27.f,  27.f};
 constexpr Box kTitle       = { 34.f,  76.f, 323.f,  73.f};
 constexpr Box kStereo      = { 42.f, 158.f, 150.f,  73.f};
 constexpr Box kMono        = {200.f, 158.f, 147.f,  73.f};
 constexpr Box kSolo        = {123.f, 258.f, 145.f, 148.f};
 constexpr Box kSwitch      = { 38.f, 483.f,  52.f,  28.f};
 constexpr Box kQualityText = { 96.f, 470.f, 256.f,  54.f};
-constexpr Box kQualityHelp = {357.f, 485.f,  23.f,  23.f};
+constexpr Box kQualityHelp = {356.f, 484.f,  25.f,  25.f};
 constexpr Box kLoudness    = { 98.f, 604.f, 196.f,  86.f};
-constexpr Box kLoudHelp    = {299.f, 634.f,  23.f,  23.f};
+constexpr Box kLoudHelp    = {298.f, 633.f,  25.f,  25.f};
 
 /*  The client's wording, verbatim. It is expected to be revised, so it is
     gathered here rather than spelled inline at each draw call -- and the
@@ -247,25 +247,33 @@ void paint(HWND hwnd, HDC dc) {
 
 	{
 		const FontFamily* mono = g_assets->bannerFace();
-		const float start = kBanner.h * t.scale * 0.44f;
+		const float start = kBanner.h * t.scale * 0.46f;
 		// The first line has the strip to itself and takes the full width; the
 		// second shares its row with the help button, so it has to stop short
 		// of it at both ends -- it is centred, and a heading that clears the
 		// button on one side and slides under it on the other is worse than a
 		// slightly smaller one.
 		const float clear = (kDesignW - kBannerHelp.x) * t.scale;
+		// The measured width is trimmed a little further than the box, because
+		// the stroke below sits outside the letterforms and the measurement does
+		// not know about it.
 		const float first = skin::fitSize(g, kBannerLine1, mono, FontStyleBold, start,
-		                                  float(cw) - 12.f * t.scale);
+		                                  float(cw) - 14.f * t.scale);
 		const float second = skin::fitSize(g, kBannerLine2, mono, FontStyleBold, start,
 		                                   float(cw) - clear * 2.f);
 		// One size for both, or they read as two headings rather than one that
 		// happens to take two lines.
 		const float em = (std::min)(first, second);
 		const float half = float(bannerH) * 0.5f;
-		skin::drawText(g, kBannerLine1, mono, em, FontStyleBold, skin::kBannerText,
-		               RectF(0.f, 0.f, float(cw), half), &skin::kBannerShade);
-		skin::drawText(g, kBannerLine2, mono, em, FontStyleBold, skin::kBannerText,
-		               RectF(0.f, half, float(cw), half), &skin::kBannerShade);
+		// Thin enough that the counters of the O and the A stay open: a heavier
+		// stroke closes them and the line turns into a green smear.
+		const float stroke = em * 0.12f;
+		skin::drawOutlinedText(g, kBannerLine1, mono, em, FontStyleBold, skin::kBannerText,
+		                       skin::kBannerOutline, stroke,
+		                       RectF(0.f, 0.f, float(cw), half));
+		skin::drawOutlinedText(g, kBannerLine2, mono, em, FontStyleBold, skin::kBannerText,
+		                       skin::kBannerOutline, stroke,
+		                       RectF(0.f, half, float(cw), half));
 	}
 	skin::drawHelp(g, place(kBannerHelp, t), g_hot == WBannerHelp, serif);
 
