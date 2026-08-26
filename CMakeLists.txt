@@ -18,8 +18,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(WIN32)
     add_executable(fmd-router WIN32
         src/Main.cpp
+        src/Face.cpp
         src/Engine.cpp
         src/Devices.cpp
+        # The client's backgrounds and type faces, compiled in. An app whose
+        # appearance depends on a folder beside the exe is an app that renders
+        # as grey rectangles the first time someone moves one.
+        src/Resources.rc
     )
 
     target_include_directories(fmd-router PRIVATE src)
@@ -36,6 +41,10 @@ if(WIN32)
         avrt        # MMCSS, for Pro Audio thread priority
         comctl32    # trackbars
         comdlg32    # the file-open dialog
+        # GDI+, which draws the client's face: the JPEG plates, their fonts
+        # taken from memory rather than installed, and the antialiasing. Also
+        # Windows' own, not a third-party dependency -- see src/Skin.h.
+        gdiplus
         # Media Foundation, for the file player's mp3/ogg/flac/m4a decoding.
         # These are Windows' own codecs, not a third-party dependency: see the
         # note at the top of src/MediaFile.h for why that was the choice.
